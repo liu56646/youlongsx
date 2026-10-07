@@ -336,3 +336,54 @@ VMHOST_READBACK tex=33 1080x1920 sampled=129600 nonzero=0       ← 但读回的
 3. **在宿主 `FrameBuffer::post` 打点**（posted CB 的 handle + host tex），把
    「访客 handle ↔ host tex ↔ 是否被 blit」三者对上 —— 这是修"渲染/post 两块 buffer 不一致"
    的前提。
+
+## 11. 2026-10-07（五）：黑帧根因确证 —— `rcFBPost` 的 handle ≠ 渲染的 window surface
+
+### 11.1 三个信号（同一次运行，真机）
+
+```
+VMHOST_POST  handle=0x8  cbHndl=0x8  tex=33  1080x1920     ← 被 post 的（截的就是它）
+VMHOST_POST  handle=0xb  cbHndl=0xb  tex=46  1080x1920
+VMHOST_BLIT dst m_tex=42 nonzero=64/256 err=0x0            ← blit 目标确实被写进了内容
+VMHOST_BLIT dst m_tex=25 nonzero=64/256 err=0x0
+VMHOST_BLIT dst m_tex=38 nonzero=64/256 err=0x0
+VMHOST_GLES2_LOWFREQ op=10015 len=16 a0=0x6 a1=0xa          ← rcSetWindowColorBuffer(display=6, cb=0xa)
+VMHOST_GLES2_LOWFREQ op=10015 len=16 a0=0x6 a1=0x5          ← …另一次 cb=0x5
+VMHOST_GLES2_LOWFREQ op=10016 len=12 a0=0x6                 ← rcFlushWindowColorBuffer(display=6)
+VMHOST_GLES2_LOWFREQ op=10018 len=12 a0=0xb                 ← rcFBPost(cb=0xb)
+VMHOST_GLES2_LOWFREQ op=10018 len=12 a0=0x8                 ← rcFBPost(cb=0x8)
+VMHOST_READBACK tex=33 … nonzero=0
+VMHOST_READBACK tex=46 … nonzero=0
+```
+
+**结论**：访客把 window surface（渲染目标）设成 handle **0x5 / 0xa**，内容确实画进去了
+（blit 目标 host tex 25/38/42 采样到 64/256 非零，与源一致）；但它 `rcFBPost` 提交的是
+handle **0x8 / 0xb**（host tex **33 / 46**）——这两块**从未被渲染或搬运过**，所以读回恒为 0、
+画面全黑。
+
+即：**`rcFBPost` 的 handle 与 `rcSetWindowColorBuffer` 设置的渲染目标不是同一块**。
+这不是"读不出来"，也不是"没画"，而是**post 错了 buffer**。
+
+### 11.2 待查的修复方向（下一轮）
+
+1. **确认上游语义**：查 gfxstream 上游 / Android emulator 的 HWC 实现，`rcFBPost(handle)`
+   到底应该是"自己渲染的那块"还是"display 的独立输出块"。若上游也是这个序列，则说明
+   host 侧在 `post` 时应当把 window surface 的内容 flush/blit 到被 post 的 CB
+   （`FrameBuffer::post` 里对 `p_colorbuffer` 做一次 `blitFromCurrentReadBuffer`）。
+2. **对照 `rcFlushWindowColorBuffer(display=6)`**：它当前落到哪个 CB？若它 flush 的是 0x5/0xa
+   而非 0x8/0xb，就能解释内容为什么停在"非 post 的那两块"上；修复点即在
+   `FrameBuffer::flushEmulatedEglWindowSurfaceColorBuffer` / `post` 的衔接处。
+3. 备选（更快但更 dirty）：让 `rcFBPost` 直接把 window surface 的当前 CB 也 post 一次，
+   验证画面是否能立刻出现（用于确认这条链路就是唯一症结）。
+
+### 11.3 诊断插桩已仓库化（幂等补丁）
+
+宿主侧的 VMHOST_DIAG 系列插桩已从"只手改在 WSL 源码树"改为**仓库内的幂等补丁**：
+
+- 脚本：`vm/engine/scripts/qemu_patches/patch_vmhost_diag.py`
+  （逐条 marker 判重；锚点未命中只 WARN 不中断 —— 诊断插桩不是构建必需）
+- 调用：`build_gfxstream.sh` 第 5 步（在 GLDispatch 补丁之后）
+- 覆盖：GLES2 命令直方图/崩溃前 64 条/低频调用参数、ColorBuffer 的
+  blit(enter/copy_done/src/dst/after_viewport/after_unbind) 与 readback 内容校验、
+  TextureDraw 链接结果、`FrameBuffer::post` 的 `handle ↔ host tex` 打点
+- 实测幂等：首次应用 2 条、跳过 8 条；再跑一次 0 应用 / 10 跳过

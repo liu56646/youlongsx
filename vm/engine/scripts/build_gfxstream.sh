@@ -139,6 +139,15 @@ VMHOST_PY
         || { echo "!! GLDispatch 补丁未生效" >&2; exit 1; }
 fi
 
+# 5) 宿主侧诊断插桩（VMHOST_DIAG 系列）：GLES2 命令直方图/环形缓冲、
+#    ColorBuffer 的 blit 与 readback 探针、TextureDraw 链接结果、FrameBuffer::post 打点。
+#    逐条幂等（marker 命中即跳过），锚点未命中只告警不中断 —— 诊断插桩不是构建必需。
+#    用法与说明见 qemu_patches/patch_vmhost_diag.py 的文件头。
+if [ -f "$TOOLS_DIR/qemu_patches/patch_vmhost_diag.py" ]; then
+    python3 "$TOOLS_DIR/qemu_patches/patch_vmhost_diag.py" "$SRC_DIR" || \
+        echo "!! VMHOST_DIAG 插桩脚本执行异常（仅告警，继续构建）" >&2
+fi
+
 # ---------------------------------------------------------------- 1. configure
 # 宿主侧需要 <cutils/native_handle.h>（AOSP 头，NDK 没有；仓内自带一份）。
 # 只把这一个头拷进 shim 目录，避免把 android_stub 整目录挂上来遮蔽 NDK 头。
