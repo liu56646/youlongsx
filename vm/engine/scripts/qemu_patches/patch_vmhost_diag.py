@@ -422,6 +422,113 @@ edit("host/FrameBuffer.cpp", "VMHOST_POST handle=",
 
 
 # ----------------------------------------------------------------------------
+# 4b) RenderControl::rcBindTexture —— 判定"被绑定的图层 buffer 里到底有没有内容"
+#
+# rcBindTexture（renderControl opcode 10020，a0 = CB handle）是访客把某块 ColorBuffer
+# 当纹理采样的时刻。就在这一刻把这块 CB 的内容按 **RGB 口径**（排除 alpha）采出来，
+# 回答"guest 画的东西到底有没有落进这块 CB"。
+#
+# 为什么在 RenderControl 层直接走 GL（而不是退化成只记录纹理名）：
+#   - rcBindTexture 拿到的只是 ColorBuffer（不是 Gl 子类），但 glOpGetTexture() 给出了
+#     宿主 GL 纹理名，采样不需要 Gl 子类；
+#   - 此刻 render 线程**一定**有 current context —— 否则上面的 bindColorBufferToTexture
+#     （ColorBufferGl::bindToTexture 里 `if (!tInfo->currContext.get()) return false;`）
+#     会直接返回 false；所以可以直接调 s_gles2；
+#   - RenderControl.cpp 的 include 链已带进 <GLES2/gl2.h>（经 renderControl_types.h →
+#     apigen-codec-common/glUtils.h），且本文件已在用 gl::s_gles2，无需新增 include。
+#   - 采样手法与 ColorBufferGl::blitFromCurrentReadBuffer 里的 VMHOST_BLIT src/dst
+#     段落完全一致：临时 FBO + glFramebufferTexture2D + glReadPixels，**只数 RGB 非零的
+#     像素**（A=255 来自访客每帧的 glClear，不能当成"有内容"）。
+# 限速：每 60 次绑定采一次，避免拖慢 60fps 的回传路径。
+# ----------------------------------------------------------------------------
+edit("host/RenderControl.cpp", "VMHOST_BINDTEX",
+     [("""static void rcBindTexture(uint32_t colorBuffer)
+{
+    FrameBuffer *fb = FrameBuffer::getFB();
+    if (!fb) {
+        return;
+    }
+
+    // Update for GL use if necessary.
+    fb->invalidateColorBufferForGl(colorBuffer);
+
+    fb->bindColorBufferToTexture(colorBuffer);
+}""",
+       """static void rcBindTexture(uint32_t colorBuffer)
+{
+    FrameBuffer *fb = FrameBuffer::getFB();
+    if (!fb) {
+        return;
+    }
+
+    // Update for GL use if necessary.
+    fb->invalidateColorBufferForGl(colorBuffer);
+
+    fb->bindColorBufferToTexture(colorBuffer);
+
+    /* VMHOST_DIAG: 判定"被绑定的图层 buffer 里到底有没有内容"。
+       rcBindTexture 是访客（renderControl opcode 10020，a0 = CB handle）把某块
+       ColorBuffer 当纹理采样的时刻 —— 就在这一刻把这块 CB 的内容按 **RGB 口径**
+       （排除 alpha）采出来，回答"guest 画的东西到底有没有落进这块 CB"。
+       为什么在 RenderControl 层直接走 GL：rcBindTexture 只拿得到 ColorBuffer
+       （不是 Gl 子类），但 glOpGetTexture() 给出了宿主 GL 纹理名；此刻 render 线程
+       已经有 current context（否则上面的 bindColorBufferToTexture 会直接返回 false），
+       所以这里直接调 s_gles2 的临时 FBO + glReadPixels，手法与
+       ColorBufferGl::blitFromCurrentReadBuffer 里的 VMHOST_BLIT src/dst 段落一致
+       （只数 RGB 非零的像素，A=255 不算内容）。限速：每 60 次绑定采一次，
+       避免拖慢 60fps 的回传路径。 */
+    {
+        static uint32_t s_bindCount = 0;
+        const uint32_t n = ++s_bindCount;
+        if ((n % 60u) == 0u) {
+            ColorBufferPtr cb = fb->findColorBuffer(colorBuffer);
+            RenderThreadInfoGl* tInfo = RenderThreadInfoGl::get();
+            if (!cb) {
+                fprintf(stderr, "VMHOST_BINDTEX cb=0x%x n=%u NO_CB\\n", colorBuffer, n);
+            } else if (!tInfo || !tInfo->currContext.get()) {
+                /* 无 current context 时 GL 采样无意义 —— 退化为只记录 handle + 纹理名 */
+                fprintf(stderr, "VMHOST_BINDTEX cb=0x%x n=%u tex=%u NO_CONTEXT\\n",
+                        colorBuffer, n, (unsigned) cb->glOpGetTexture());
+            } else {
+                const unsigned w = cb->getWidth();
+                const unsigned h = cb->getHeight();
+                const unsigned sw = w >= 8u ? 8u : (w ? w : 1u);
+                const unsigned sh = h >= 8u ? 8u : (h ? h : 1u);
+                const unsigned sx = w >= sw ? (w - sw) / 2u : 0u;
+                const unsigned sy = h >= sh ? (h - sh) / 2u : 0u;
+                const GLuint tex = cb->glOpGetTexture();
+
+                uint8_t block[8 * 8 * 4] = {0};
+                GLint prevFbo = 0;
+                GLuint tmpFbo = 0;
+                gl::s_gles2.glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFbo);
+                gl::s_gles2.glGenFramebuffers(1, &tmpFbo);
+                gl::s_gles2.glBindFramebuffer(GL_FRAMEBUFFER, tmpFbo);
+                gl::s_gles2.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                                   GL_TEXTURE_2D, tex, 0);
+                const GLenum st = gl::s_gles2.glCheckFramebufferStatus(GL_FRAMEBUFFER);
+                gl::s_gles2.glReadPixels((GLint) sx, (GLint) sy, (GLsizei) sw, (GLsizei) sh,
+                                         GL_RGBA, GL_UNSIGNED_BYTE, block);
+                /* 只数 RGB 非零的像素（排除 alpha：A=255 会掩盖"其实是黑的"） */
+                size_t nz = 0;
+                for (size_t p = 0; p + 3 < (size_t) sw * sh * 4u; p += 4u) {
+                    if (block[p] | block[p + 1] | block[p + 2]) nz++;
+                }
+                fprintf(stderr,
+                        "VMHOST_BINDTEX cb=0x%x n=%u tex=%u %ux%u at(%u,%u) "
+                        "fboStatus=0x%x nonzeroRGB=%zu/%zu err=0x%x\\n",
+                        colorBuffer, n, (unsigned) tex, w, h, sx, sy, st,
+                        nz, (size_t) sw * (size_t) sh, gl::s_gles2.glGetError());
+                gl::s_gles2.glBindFramebuffer(GL_FRAMEBUFFER, prevFbo);
+                gl::s_gles2.glDeleteFramebuffers(1, &tmpFbo);
+            }
+        }
+    }
+}""")],
+     note="rcBindTexture 采样被绑定 CB 的 8x8 内容（RGB 口径）")
+
+
+# ----------------------------------------------------------------------------
 # 5) 验证性兜底（**默认不启用**，需 VMHOST_HACK_POST_CB=1）：被 post 的 CB 与渲染的
 #    window surface CB 不是同一块（见 docs/方案B排障交接.md §11：guest flush 进
 #    5/9/a，却 post 8/b）。这是验证假设用的 hack，不是最终修法。
