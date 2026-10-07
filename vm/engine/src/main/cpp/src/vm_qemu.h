@@ -51,4 +51,13 @@ bool vm_qemu_stop(int timeout_ms);
 /** QEMU 是否正在运行。 */
 bool vm_qemu_is_running(void);
 
+/**
+ * QEMU 是否跑在独立子进程里（B1 模式）。
+ *
+ * 子进程模式下访客帧缓冲在**另一个进程**的内存里，进程内的显示后端
+ * （vmhost_display_*）永远取不到帧，必须改用帧回传文件握手
+ * （vm_frame_relay.h）。引擎据此决定要不要打开回传。
+ */
+bool vm_qemu_is_child_process(void);
+
 #endif /* VM_QEMU_H */

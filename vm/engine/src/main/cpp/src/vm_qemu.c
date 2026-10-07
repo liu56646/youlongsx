@@ -160,7 +160,20 @@ static void *qemu_thread_main(void *arg)
  * 子进程的二进制作成 jniLib 随包分发，落在本 .so 同目录（nativeLibraryDir），
  * 那是 Android 上唯一允许 app 执行的位置；找不到它时退回进程内嵌的方式。
  * ------------------------------------------------------------------ */
-#define QEMU_CHILD_FILE "libqemu_exec.so"
+/*
+ * 子进程可执行体的候选文件名，都在 nativeLibraryDir 里查找。
+ *
+ * Android 10+ 只允许执行 nativeLibraryDir 下的文件，而该目录由 APK 的
+ * jniLibs 解压而来，所以 QEMU 必须打包成 lib*.so：
+ *   - libqemu_exec.so            ：build_qemu_aosp.sh 的正式产物名
+ *                                  （见 engine/.gitignore 里那条忽略规则）
+ *   - libqemu-system-aarch64.so  ：build_qemu.sh（上游 QEMU）的产物名
+ * 这里挨个试，避免构建脚本一改名引擎就静默退回进程内嵌模式。
+ */
+static const char *const kQemuChildNames[] = {
+    "libqemu_exec.so",
+    "libqemu-system-aarch64.so",
+};
 
 static pid_t s_child_pid = -1;
 extern char **environ;
@@ -353,17 +366,29 @@ int vm_qemu_start(const VmQemuParams *p)
        那是目前唯一验证过能让这套访客跑到 boot_completed 的方式（见文件中部说明）。 */
     {
         char lib_dir[ARG_CAP];
-        char exe[ARG_CAP];
         if (self_lib_dir(lib_dir, sizeof(lib_dir))) {
-            snprintf(exe, sizeof(exe), "%s/%s", lib_dir, QEMU_CHILD_FILE);
-            if (file_ok(exe)) {
+            bool tried = false;
+            for (size_t i = 0;
+                 i < sizeof(kQemuChildNames) / sizeof(kQemuChildNames[0]); i++) {
+                char exe[ARG_CAP];
+                snprintf(exe, sizeof(exe), "%s/%s", lib_dir, kQemuChildNames[i]);
+                if (!file_ok(exe)) {
+                    continue;
+                }
+                tried = true;
                 if (spawn_qemu_child(p, exe, lib_dir) == 0) {
                     pthread_mutex_unlock(&s_lock);
                     return 0;
                 }
+                LOGW("%s 拉起失败，继续尝试其它候选", exe);
+            }
+            if (tried) {
                 LOGW("子进程模式启动失败，退回进程内嵌方式");
             } else {
-                LOGI("未找到 %s，使用进程内嵌 QEMU（-M virt）", exe);
+                LOGI("nativeLibraryDir(%s) 里没有 QEMU 可执行体，"
+                     "使用进程内嵌 QEMU（-M virt）。"
+                     "提示：AOSP QEMU 需由 build_qemu_aosp.sh 安装为 "
+                     "jniLibs/<abi>/%s", lib_dir, kQemuChildNames[0]);
             }
         } else {
             LOGW("无法定位 nativeLibraryDir，使用进程内嵌 QEMU");
@@ -554,6 +579,15 @@ bool vm_qemu_stop(int timeout_ms)
     }
     LOGI("QEMU 已退出");
     return true;
+}
+
+bool vm_qemu_is_child_process(void)
+{
+    /* 注意不要用 child_alive()：它会 waitpid 回收子进程，有副作用。 */
+    pthread_mutex_lock(&s_lock);
+    const bool child = (s_child_pid > 0);
+    pthread_mutex_unlock(&s_lock);
+    return child;
 }
 
 bool vm_qemu_is_running(void)

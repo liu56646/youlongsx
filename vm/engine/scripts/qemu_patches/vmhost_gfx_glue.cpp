@@ -413,6 +413,13 @@ extern "C" int vmhost_gfx_screenshot_to_file(const char* path, int max_w, int ma
         vmhost_gfx_log("screenshot: 读取失败 res=%d", res);
         return -1;
     }
+    // getScreenshot(format=3) 给的是 RGBA8888，每像素 4 字节；
+    // 而 P6 每像素只有 3 字节。这里先确认缓冲够大，避免越界读。
+    const size_t px = (size_t) w * (size_t) h;
+    if (cap < px * 4u) {
+        vmhost_gfx_log("screenshot: 缓冲不足 cap=%zu 需要=%zu", cap, px * 4u);
+        return -1;
+    }
     // 先写临时文件再 rename，保证 App 侧永远读不到半帧。
     char tmp[1024];
     if (snprintf(tmp, sizeof(tmp), "%s.tmp", path) >= (int)sizeof(tmp)) {
@@ -424,9 +431,22 @@ extern "C" int vmhost_gfx_screenshot_to_file(const char* path, int max_w, int ma
         return -1;
     }
     fprintf(fp, "P6\n%u %u\n255\n", w, h);
-    const size_t written = fwrite(pixels.data(), 1, cap, fp);
+    // 关键：必须把 RGBA 拆成 RGB 写入。
+    // 之前是 fwrite(pixels.data(), 1, cap, fp)，把 4 字节/像素的 RGBA 直接
+    // 倒进了声明为 3 字节/像素的 P6 文件 —— 消费端（App 侧帧回传）读到的
+    // 就是错位的花屏数据。
+    size_t written = 0;
+    for (size_t i = 0; i < px; i++) {
+        const uint8_t* s = pixels.data() + i * 4u;
+        if (fputc(s[0], fp) == EOF || fputc(s[1], fp) == EOF ||
+            fputc(s[2], fp) == EOF) {
+            break;
+        }
+        written += 3;
+    }
     fclose(fp);
-    if (written != cap) {
+    if (written != px * 3u) {
+        vmhost_gfx_log("screenshot: 写入不完整 %zu/%zu", written, px * 3u);
         unlink(tmp);
         return -1;
     }

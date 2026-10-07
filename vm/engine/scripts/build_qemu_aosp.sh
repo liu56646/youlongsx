@@ -30,7 +30,11 @@ GFX_DIR="${GFX_DIR:-$WORKDIR/gfxstream}"
 GFX_BUILD_DIR="${GFX_BUILD_DIR:-$WORKDIR/gfxstream-build-arm64-v8a}"
 
 TOOLS_DIR="$(cd "$(dirname "$0")" && pwd)"
+ENGINE_DIR="$(cd "$TOOLS_DIR/.." && pwd)"
+ABI="${ABI:-arm64-v8a}"
 OUT_DIR="${OUT_DIR:-$TOOLS_DIR/../src/main/cpp/prebuilt/qemu-aosp/arm64-v8a}"
+# 子进程 QEMU 必须随 APK 分发，见本文件末尾「安装到 jniLibs」一节。
+JNI_DIR="$ENGINE_DIR/src/main/jniLibs/$ABI"
 
 NDK_VER="${NDK_VER:-r28}"
 NDK_DIR="$WORKDIR/android-ndk-$NDK_VER"
@@ -926,7 +930,35 @@ done
 # 旧版本残留的 libc++_shared.so 已不需要，清掉避免误导
 rm -f "$OUT_DIR/libc++_shared.so"
 
+# ---------------------------------------------------------------- 5. 安装到 jniLibs
+# 引擎（src/main/cpp/src/vm_qemu.c）在 **nativeLibraryDir** 里按
+# libqemu_exec.so 查找子进程 QEMU；该目录由 APK 的 jniLibs 解压而来，
+# 所以可执行体与它的运行时依赖都必须以 lib*.so 形式放进
+# engine/src/main/jniLibs/<abi>/ 才会被 AGP 打包。
+#
+# 这一步以前完全缺失：没有任何脚本产出 jniLibs/libqemu_exec.so
+# （build_qemu.sh 产出的是 prebuilt/qemu/.../libqemu-system-aarch64.so），
+# 于是 vm_qemu_start() 永远找不到子进程 QEMU，静默退回进程内嵌的
+# 「-M virt」路径 —— 而那条路跑不起来这套 ranchu 访客。
+mkdir -p "$JNI_DIR"
+if [ -f "$EXE" ]; then
+    cp -f "$EXE" "$JNI_DIR/libqemu_exec.so"
+    chmod 0755 "$JNI_DIR/libqemu_exec.so"
+    echo "==> 已安装子进程可执行体：$JNI_DIR/libqemu_exec.so"
+else
+    echo "!! 未生成 $EXE，jniLibs 里不会有 libqemu_exec.so" >&2
+fi
+
+for _so in $RUNTIME_SOS; do
+    if [ -f "$OUT_DIR/$_so" ]; then
+        cp -f "$OUT_DIR/$_so" "$JNI_DIR/$_so"
+    fi
+done
+
 echo "==> 目标文件数：$(find "$BUILD_DIR" -name '*.o' | wc -l)"
 echo "==> 已收集到 $OUT_DIR："
 ls -lh "$OUT_DIR" | tail -n +2
+echo
+echo "==> jniLibs（随 APK 分发，解压到 nativeLibraryDir）：$JNI_DIR"
+ls -lh "$JNI_DIR" | tail -n +2
 echo "完成。"
