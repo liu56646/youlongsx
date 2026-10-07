@@ -218,3 +218,52 @@ regs x0=0x1     ← 正是 glBindVertexArray(vao=1) 的参数
 - `engine/build.gradle.kts`：`keepDebugSymbols += "**/libqemu_exec.so"` **实测不需要**
   —— strip 后的可执行体真机照常 exec 成功，去掉后 APK 从 ~120MB 降到 **29.2MB**。
 - `memoryMb/cores` 已从 `VmConfig` 读取（见 §7.1）。
+
+## 9. 2026-10-07（三）：宿主侧回传链路完全打通，已能连续出帧
+
+### 9.1 关键修复：GL 分发表的版本门控
+
+`GLDispatch::dispatchFuncs()` 里 ES3/ES3.1 入口是**按传入的 version 门控加载**的
+（原版 `if (version >= GLES_3_0)` / `>= GLES_3_1`），而这张表**只加载一次**
+（`m_isLoaded` 早退），先到者定版本。实测宿主是 GLES 3.2，表却按 GLES_1_1 先加载
+→ ES3 入口（`glBindVertexArray` / `glGenVertexArrays` …）全为 NULL
+→ GLES1 翻译器在 egl2egl 模式下用 `CoreProfileEngine` 调它们，一调就 pc=0。
+
+改为**一律尝试解析**（宿主不支持的入口 `getProc` 本就返回 NULL，与门控结果一致，
+不会"假装支持"）。补丁位置：`host/gl/glestranslator/GLcommon/GLDispatch.cpp`
+（搜索 `VMHOST_FIX`）。
+
+### 9.2 实测结果（真机 cc96ded5，实例 vm_1，访客 p11_arm64）
+
+| 项 | 结果 |
+|---|---|
+| 子进程稳定性 | ✅ 不再崩溃，连续跑 > 10 分钟（此前必在访客 ~190s SIGSEGV） |
+| 帧回传速率 | ✅ `frame.seq` 累计 866+，约 2–4 fps |
+| QEMU 侧截图 | ✅ `screenshot: post-callback 1080x1920 -> …/frame.ppm (seq=…)` |
+| 引擎侧上屏 | ✅ `VmGuestDpy: 访客画面 1080x1920`（PPM 解析 + GL 纹理上传成功） |
+| frame.ppm 尺寸 | ✅ 6,220,817 字节 = P6 头 + 1080×1920×3，与访客原生分辨率完全吻合 |
+| **帧内容** | ❌ 全黑（粗采样 1519 个字节全为 0） |
+
+结论：**"请求 → 截图 → 回传 → 解析 → 上屏"整条链路已经打通**，帧在稳定流动，
+尺寸与格式都对。剩下的是"帧内容为空"。
+
+### 9.3 剩余问题：帧内容是黑的（下一步）
+
+已知事实：
+- 访客**确实 post 过帧**（走的是 post-callback 路径，`s_latest_pixels` 有数据，
+  否则 glue 会退回 `getScreenshot`），说明 `rcFBPost` 通了；
+- 但读到的缓冲区全是 0 → 访客画进去的内容是空的；
+- 访客此轮仍未 `boot_completed`（~322s 时 iorapd 一直拿不到 package manager），
+  但 SurfaceFlinger(155s) 与 bootanim(201s) 都已启动；
+- GLES1 操作量很大（stderr 里 17970 条 `VMHOST_GLES1_OP`）→ 访客在持续发绘制/状态命令。
+
+待查方向（按优先级）：
+1. 确认是"访客还没画"还是"绘制被吞"：查访客侧 EGL/GLES 报错
+   （guest logcat 在 `console.log` 里 grep `egl` / `EmuHWC2` / `GLES`），
+   以及 SurfaceFlinger 是否真的合成过（HWC 是否报 `Failed to get host connection`）。
+2. 若绘制被吞：CoreProfileEngine 的绘制最终要走宿主 GL（`s_glDispatch`），
+   确认着色器编译/VAO/绘制调用是否真的下发到 Adreno（可在 glue 里打开更细的
+   gfxstream 日志，或直接在宿主 GL 侧加错误检查）。
+3. 若纯粹是访客没画：等它把 system_server/PMS 起完（此前 B1 里程碑里靠
+   `vmhost_amctl` 注入 IActivityController 才让 Watchdog 不杀 system_server，
+   本 App 路径没有这个注入，值得补上）。

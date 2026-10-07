@@ -91,6 +91,54 @@ grep -q "VMHOST_NO_X11" "$f" \
     && echo "==> patch: apigen-codec-common 去掉 X11Support.cpp" \
     || { echo "!! apigen-codec-common 补丁未命中" >&2; exit 1; }
 
+# 4) GLDispatch.cpp：去掉 GL ES3 入口的版本门控。
+#    原版按传入 version 门控加载 ES3/ES3.1 入口，但这张表只加载一次（m_isLoaded
+#    早退），"先到者"的 version 未必反映宿主真实能力 —— 实测宿主是 GLES 3.2，
+#    表却按 GLES_1_1 先加载，glBindVertexArray 等 ES3 入口全为 NULL，GLES1
+#    翻译器在 egl2egl 模式下用 CoreProfileEngine 调它们时 pc=0 崩溃。
+#    详见 docs/方案B排障交接.md §9.1。
+f="$SRC_DIR/host/gl/glestranslator/GLcommon/GLDispatch.cpp"
+if grep -q "VMHOST_FIX" "$f"; then
+    echo "==> patch: GLDispatch 版本门控（已打过，跳过）"
+else
+    python3 - "$f" <<'VMHOST_PY'
+import io, sys
+p = sys.argv[1]
+src = io.open(p, encoding='utf-8').read()
+old = """    if (version >= GLES_3_0) {
+        LIST_GLES3_ONLY_FUNCTIONS(LOAD_GLEXT_FUNC)
+        LIST_GLES3_ONLY_FUNCTIONS(LOAD_GLEXT_FUNC_DEBUG_LOG_WRAPPER)
+
+        LIST_GLES3_EXTENSIONS_FUNCTIONS(LOAD_GLEXT_FUNC)
+        LIST_GLES3_EXTENSIONS_FUNCTIONS(LOAD_GLEXT_FUNC_DEBUG_LOG_WRAPPER)
+    }
+
+    if (version >= GLES_3_1) {
+        LIST_GLES31_ONLY_FUNCTIONS(LOAD_GLEXT_FUNC)
+        LIST_GLES31_ONLY_FUNCTIONS(LOAD_GLEXT_FUNC_DEBUG_LOG_WRAPPER)
+    }"""
+new = """    /* VMHOST_FIX: 原版按 version 门控；但本表只加载一次，"先到者"的 version
+       未必反映宿主真实能力（实测宿主 GLES 3.2、表按 GLES_1_1 先加载），
+       ES3 入口全为 NULL，CoreProfileEngine 一调就 pc=0。改为一律尝试解析：
+       宿主不支持的入口 getProc 本就返回 NULL，与门控结果一致。 */
+    LIST_GLES3_ONLY_FUNCTIONS(LOAD_GLEXT_FUNC)
+    LIST_GLES3_ONLY_FUNCTIONS(LOAD_GLEXT_FUNC_DEBUG_LOG_WRAPPER)
+
+    LIST_GLES3_EXTENSIONS_FUNCTIONS(LOAD_GLEXT_FUNC)
+    LIST_GLES3_EXTENSIONS_FUNCTIONS(LOAD_GLEXT_FUNC_DEBUG_LOG_WRAPPER)
+
+    LIST_GLES31_ONLY_FUNCTIONS(LOAD_GLEXT_FUNC)
+    LIST_GLES31_ONLY_FUNCTIONS(LOAD_GLEXT_FUNC_DEBUG_LOG_WRAPPER)"""
+if old not in src:
+    sys.stderr.write("!! GLDispatch 补丁未命中\n")
+    sys.exit(1)
+io.open(p, 'w', encoding='utf-8').write(src.replace(old, new, 1))
+VMHOST_PY
+    grep -q "VMHOST_FIX" "$f" \
+        && echo "==> patch: GLDispatch 去掉 ES3 入口的版本门控" \
+        || { echo "!! GLDispatch 补丁未生效" >&2; exit 1; }
+fi
+
 # ---------------------------------------------------------------- 1. configure
 # 宿主侧需要 <cutils/native_handle.h>（AOSP 头，NDK 没有；仓内自带一份）。
 # 只把这一个头拷进 shim 目录，避免把 android_stub 整目录挂上来遮蔽 NDK 头。
