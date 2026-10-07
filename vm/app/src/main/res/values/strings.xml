@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">游龙沙箱</string>
+
+    <string name="action_create">新建实例</string>
+    <string name="one_click_start">一键启动</string>
+    <string name="action_start">启动</string>
+    <string name="action_stop">停止</string>
+    <string name="action_rename">重命名</string>
+    <string name="action_delete">删除</string>
+    <string name="action_ok">确定</string>
+    <string name="action_cancel">取消</string>
+    <string name="action_network">准备网络</string>
+    <string name="action_extract">解压镜像</string>
+
+    <string name="empty_hint">还没有实例，点右下角 + 新建</string>
+
+    <string name="status_fmt">引擎：%1$s\n镜像：%2$s · %3$s</string>
+    <string name="engine_ok">可用 v%1$s</string>
+    <string name="engine_missing">缺失（未构建原生引擎）</string>
+    <string name="image_ready">就绪</string>
+    <string name="image_missing">未就绪</string>
+
+    <string name="vm_meta_fmt">实例 #%1$d · 镜像 %2$s</string>
+    <string name="state_running">运行中</string>
+    <string name="state_stopped">已停止</string>
+
+    <string name="created_fmt">已创建 %1$s</string>
+    <string name="err_limit">实例数已达上限（%1$d）</string>
+    <string name="err_no_engine">引擎未构建：请先完成 QEMU / libvmengine 编译</string>
+    <string name="err_no_image">访客镜像未就绪：请先解压 assets/guest/%1$s.zip</string>
+    <string name="err_unsupported">暂不支持该实例号</string>
+
+    <string name="confirm_delete">删除后该实例的数据盘会一并清除，确定？</string>
+    <string name="network_started">网络服务已启动</string>
+    <string name="network_denied">未授权 VPN，访客将无法联网</string>
+    <string name="image_already_ready">镜像已就绪</string>
+    <string name="image_extracting">开始解压 %1$s …</string>
+    <string name="image_extract_ok">解压完成：%1$s</string>
+    <string name="image_extract_fail">解压失败：assets/guest/%1$s.zip 不存在</string>
+
+    <!-- 一键启动 / 镜像下载 -->
+    <string name="download_title">正在准备访客镜像</string>
+    <string name="download_waiting">正在连接…</string>
+    <string name="download_progress">%1$s / %2$s</string>
+    <string name="download_fail">镜像下载失败，请检查网络或改用本地导入</string>
+    <string name="image_url_missing">未配置镜像下载地址（构建时用 -PguestImageBaseUrl=… 注入），请选择本地镜像包</string>
+    <string name="import_pick_hint">选择镜像包 p11_arm64.zip</string>
+    <string name="import_ok">镜像导入完成</string>
+    <string name="import_fail">镜像导入失败</string>
+    <string name="no_free_instance">实例数已达上限，请先删除一个</string>
+    <string name="preparing_instance">正在准备实例…</string>
+    <string name="pick_guest_version">选择访客系统版本</string>
+    <string name="version_ready">已就绪</string>
+    <string name="version_need_download">未下载</string>
+    <string name="version_item_fmt">%1$s（API %2$d · 约 %3$d MB）— %4$s</string>
+    <string name="image_url_missing_short">未配置镜像服务器，请改用「导入镜像」选本地 zip</string>
+</resources>

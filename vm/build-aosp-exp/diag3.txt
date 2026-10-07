@@ -1,0 +1,15 @@
+A 10909 5059 R
+A 10913 0 S
+A 10914 0 S
+A 10915 0 S
+A 10918 662 S
+B 10909 5563 R
+B 10913 0 S
+B 10914 0 S
+B 10915 0 S
+B 10918 662 S
+--- guest tail ---
+[    8.110080] init: Loaded kernel module /lib/modules/virtio_input.ko
+[    8.112056] init: Loading module /lib/modules/virtio_mmio.ko with args ""
+[    8.158979] virtio_blk virtio0: [vda] 6313984 512-byte logical blocks (3.23 GB/3.01 GiB)
+DONE

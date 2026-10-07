@@ -1,0 +1,156 @@
+--------- beginning of kernel
+01-01 00:00:00.000000     0     0 I         : Booting Linux on physical CPU 0x0000000000 [0x411fd070]
+01-01 00:00:00.000000     0     0 I         : Linux version 5.4.86-android11-2-00006-gae78026f427c-ab7595864 (build-user@build-host) (Android (7284624, based on r416183b) clang version 12.0.5 (https://android.googlesource.com/toolchain/llvm-project c935d99d7cf2016289302412d708641d52d2f7ee), LLD 12.0.5 (/buildbot/src/android/llvm-toolchain/out/llvm-project/lld c935d99d7cf2016289302412d708641d52d2f7ee)) #1 SMP PREEMPT Thu Jul 29 20:54:47 UTC 2021
+01-01 00:00:00.000000     0     0 I Machine model: ranchu
+01-01 00:00:00.000000     0     0 I printk  : debug: ignoring loglevel setting.
+01-01 00:00:00.000000     0     0 I efi     : Getting EFI parameters from FDT:
+01-01 00:00:00.000000     0     0 I efi     : UEFI not found.
+01-01 00:00:00.000000     0     0 I cma     : Reserved 16 MiB at 0x00000000bf000000
+01-01 00:00:00.000000     0     0 D         : On node 0 totalpages: 524288
+01-01 00:00:00.000000     0     0 D DMA32 zone: 8192 pages used for memmap
+01-01 00:00:00.000000     0     0 D DMA32 zone: 0 pages reserved
+01-01 00:00:00.000000     0     0 D DMA32 zone: 524288 pages, LIFO batch:63
+01-01 00:00:00.000000     0     0 I percpu  : Embedded 31 pages/cpu s90072 r8192 d28712 u126976
+01-01 00:00:00.000000     0     0 D pcpu-alloc: s90072 r8192 d28712 u126976 alloc=31*4096
+01-01 00:00:00.000000     0     0 D pcpu-alloc: [0] 0 [0] 1 [0] 2 [0] 3
+01-01 00:00:00.000000     0     0 I         : Detected PIPT I-cache on CPU0
+01-01 00:00:00.000000     0     0 I CPU features: detected: ARM erratum 832075
+01-01 00:00:00.000000     0     0 I CPU features: detected: EL2 vector hardening
+01-01 00:00:00.000000     0     0 W         : ARM_SMCCC_ARCH_WORKAROUND_1 missing from firmware
+01-01 00:00:00.000000     0     0 I         : Built 1 zonelists, mobility grouping on.  Total pages: 516096
+01-01 00:00:00.000000     0     0 I         : Kernel command line: console=ttyAMA0 androidboot.hardware=ranchu androidboot.selinux=permissive androidboot.veritymode=disabled androidboot.force_normal_boot=1 rdinit=/dumper ignore_loglevel panic=0 printk.devkmsg=on
+01-01 00:00:00.000000     0     0 I         : Dentry cache hash table entries: 262144 (order: 9, 2097152 bytes, linear)
+01-01 00:00:00.000000     0     0 I         : Inode-cache hash table entries: 131072 (order: 8, 1048576 bytes, linear)
+01-01 00:00:00.000000     0     0 I mem auto-init: stack:all(zero), heap alloc:on, heap free:off
+01-01 00:00:00.000000     0     0 I Memory  : 2010872K/2097152K available (14036K kernel code, 1190K rwdata, 9584K rodata, 1216K init, 550K bss, 69896K reserved, 16384K cma-reserved)
+01-01 00:00:00.000000     0     0 I random  : get_random_u64 called from __kmem_cache_create+0xc8/0x558 with crng_init=0
+01-01 00:00:00.000000     0     0 I SLUB    : HWalign=64, Order=0-3, MinObjects=0, CPUs=4, Nodes=1
+01-01 00:00:00.000000     0     0 I rcu     : Preemptible hierarchical RCU implementation.
+01-01 00:00:00.000000     0     0 I rcu     : RCU dyntick-idle grace-period acceleration is enabled.
+01-01 00:00:00.000000     0     0 I rcu     : RCU restricting CPUs from NR_CPUS=32 to nr_cpu_ids=4.
+01-01 00:00:00.000000     0     0 I         : Tasks RCU enabled.
+01-01 00:00:00.000000     0     0 I rcu     : RCU calculated value of scheduler-enlistment delay is 25 jiffies.
+01-01 00:00:00.000000     0     0 I rcu     : Adjusting geometry for rcu_fanout_leaf=16, nr_cpu_ids=4
+01-01 00:00:00.000000     0     0 I NR_IRQS : 64, nr_irqs: 64, preallocated irqs: 0
+01-01 00:00:00.000000     0     0 I GIC     : Using split EOI/Deactivate mode
+01-01 00:00:00.000000     0     0 I rcu     : Offload RCU callbacks from CPUs: (none).
+01-01 00:00:00.000000     0     0 W arch_timer: WARNING: Invalid trigger for IRQ2, assuming level low
+01-01 00:00:00.000000     0     0 W arch_timer: WARNING: Please fix your firmware
+01-01 00:00:00.000000     0     0 I arch_timer: cp15 timer(s) running at 62.50MHz (phys).
+01-01 00:00:00.000000     0     0 I clocksource: arch_sys_counter: mask: 0xffffffffffffff max_cycles: 0x1cd42e208c, max_idle_ns: 881590405314 ns
+01-01 00:00:00.000027     0     0 I sched_clock: 56 bits at 62MHz, resolution 16ns, wraps every 4398046511096ns
+01-01 00:00:00.005725     0     0 I         : Calibrating delay loop (skipped), value calculated using timer frequency.. 125.00 BogoMIPS (lpj=250000)
+01-01 00:00:00.005808     0     0 I pid_max : default: 32768 minimum: 301
+01-01 00:00:00.006568     0     0 I LSM     : Security Framework initializing
+01-01 00:00:00.007058     0     0 I SELinux : Initializing.
+01-01 00:00:00.007587     0     0 I         : Mount-cache hash table entries: 4096 (order: 3, 32768 bytes, linear)
+01-01 00:00:00.007638     0     0 I         : Mountpoint-cache hash table entries: 4096 (order: 3, 32768 bytes, linear)
+01-01 00:00:00.022751     0     0 E psci    : no cpu_on method, not booting CPU1
+01-01 00:00:00.022780     0     0 E psci    : no cpu_on method, not booting CPU2
+01-01 00:00:00.022792     0     0 E psci    : no cpu_on method, not booting CPU3
+01-01 00:00:00.026710     0     0 I         : ASID allocator initialised with 32768 entries
+01-01 00:00:00.027370     0     0 I rcu     : Hierarchical SRCU implementation.
+01-01 00:00:00.029132     0     0 I dynamic_debug: dynamic_debug_init: Ignore empty _ddebug table in a CONFIG_DYNAMIC_DEBUG_CORE build
+01-01 00:00:00.029440     0     0 I         : EFI services will not be available.
+01-01 00:00:00.032016     0     0 I smp     : Bringing up secondary CPUs ...
+01-01 00:00:00.032063     0     0 I smp     : Brought up 1 node, 1 CPU
+01-01 00:00:00.032082     0     0 I SMP     : Total of 1 processors activated.
+01-01 00:00:00.032130     0     0 I CPU features: detected: 32-bit EL0 Support
+01-01 00:00:00.032163     0     0 I CPU features: detected: CRC32 instructions
+01-01 00:00:00.794023     0     0 I CPU features: emulated: Privileged Access Never (PAN) using TTBR0_EL1 switching
+01-01 00:00:00.794200     0     0 I         : CPU: All CPU(s) started at EL2
+01-01 00:00:00.794482     0     0 I alternatives: patching kernel code
+01-01 00:00:00.798959     0     0 I CPU0    : update max cpu_capacity 1024
+01-01 00:00:00.814832     0     0 I         : Registered cp15_barrier emulation handler
+01-01 00:00:00.814943     0     0 I         : Registered setend emulation handler
+01-01 00:00:00.817050     0     0 I clocksource: jiffies: mask: 0xffffffff max_cycles: 0xffffffff, max_idle_ns: 7645041785100000 ns
+01-01 00:00:00.817223     0     0 I         : futex hash table entries: 1024 (order: 4, 65536 bytes, linear)
+01-01 00:00:00.822324     0     0 I pinctrl core: initialized pinctrl subsystem
+01-01 00:00:00.831447     0     0 I NET     : Registered protocol family 16
+01-01 00:00:00.840042     0     0 I DMA     : preallocated 256 KiB pool for atomic allocations
+01-01 00:00:00.840254     0     0 I audit   : initializing netlink subsys (disabled)
+--------- beginning of main
+01-01 00:00:13.132785   143   143 I lowmemorykiller: Using psi monitors for memory pressure detection
+01-01 00:00:13.162420   143   143 I lowmemorykiller: Process polling is supported
+01-01 00:00:13.793769   147   147 I qemu-props: connected to 'boot-properties' qemud service.
+01-01 00:00:13.873221   147   147 I qemu-props: receiving..
+01-01 00:00:13.874716   147   147 I qemu-props: received: qemu.hw.mainkeys=0
+--------- beginning of events
+01-01 00:00:13.890489   144   144 I snet_event_log: [121035042,-1,]
+--------- switch to main
+01-01 00:00:14.162998   147   147 I qemu-props: successfully set property 'qemu.hw.mainkeys' to '0'
+01-01 00:00:14.163627   147   147 I qemu-props: receiving..
+01-01 00:00:14.176968   147   147 I qemu-props: received: qemu.adb.secure=0
+01-01 00:00:14.187811   147   147 I qemu-props: successfully set property 'vendor.qemu.adb.secure' to '0'
+01-01 00:00:14.192731   147   147 I qemu-props: receiving..
+01-01 00:00:14.193388   147   147 I qemu-props: received: ro.kernel.qemu.opengles.version=196610
+01-01 00:00:14.214353   147   147 I qemu-props: successfully set property 'vendor.ro.kernel.qemu.opengles.version' to '196610'
+01-01 00:00:14.214950   147   147 I qemu-props: receiving..
+01-01 00:00:14.215608   147   147 I qemu-props: received: persist.logd.logpersistd=logcatd
+01-01 00:00:14.241224   147   147 I qemu-props: successfully set property 'vendor.persist.logd.logpersistd' to 'logcatd'
+01-01 00:00:14.241758   147   147 I qemu-props: receiving..
+01-01 00:00:14.265844   144   144 I SELinux : SELinux: Loaded service_contexts from:
+--------- switch to events
+01-01 00:00:14.266715   144   144 I auditd  : SELinux: Loaded service_contexts from:
+--------- switch to main
+01-01 00:00:14.276607   144   144 I SELinux :     /system/etc/selinux/plat_service_contexts
+--------- switch to events
+01-01 00:00:14.277156   144   144 I auditd  :     /system/etc/selinux/plat_service_contexts
+--------- switch to main
+01-01 00:00:14.277630   144   144 I SELinux :     /vendor/etc/selinux/vendor_service_contexts
+--------- switch to events
+01-01 00:00:14.278035   144   144 I auditd  :     /vendor/etc/selinux/vendor_service_contexts
+--------- switch to main
+01-01 00:00:14.349949   145   145 I hwservicemanager: hwservicemanager is ready now.
+01-01 00:00:14.360876   145   145 E cutils-trace: Error opening trace file: Permission denied (13)
+01-01 00:00:14.367364   145   145 I hwservicemanager: getFrameworkHalManifest: Reading VINTF information.
+01-01 00:00:14.414350   145   145 I hwservicemanager: getFrameworkHalManifest: Successfully processed VINTF information
+01-01 00:00:14.447193   145   145 I hwservicemanager: getDeviceHalManifest: Reading VINTF information.
+01-01 00:00:14.555808   145   145 I hwservicemanager: getDeviceHalManifest: Successfully processed VINTF information
+01-01 00:00:14.570400   145   145 I hwservicemanager: Since android.hardware.keymaster@4.0::IKeymasterDevice/default is not registered, trying to start it as a lazy HAL.
+01-01 00:00:14.585530   145   145 I hwservicemanager: Since android.hardware.keymaster@4.0::IKeymasterDevice/default is not registered, trying to start it as a lazy HAL.
+--------- beginning of system
+01-01 00:00:15.315889   149   149 I vold    : Vold 3.0 (the awakening) firing up
+01-01 00:00:15.324490   149   149 D vold    : Detected support for: ext4 f2fs vfat
+01-01 00:00:15.399637   149   149 W vold    : Failed to LOOP_GET_STATUS64 /dev/block/loop26: No such device or address
+01-01 00:00:15.400699   149   149 W vold    : Failed to LOOP_GET_STATUS64 /dev/block/loop25: No such device or address
+01-01 00:00:15.401384   149   149 W vold    : Failed to LOOP_GET_STATUS64 /dev/block/loop24: No such device or address
+01-01 00:00:15.402050   149   149 W vold    : Failed to LOOP_GET_STATUS64 /dev/block/loop23: No such device or address
+01-01 00:00:15.402705   149   149 W vold    : Failed to LOOP_GET_STATUS64 /dev/block/loop22: No such device or address
+01-01 00:00:15.403413   149   149 W vold    : Failed to LOOP_GET_STATUS64 /dev/block/loop21: No such device or address
+01-01 00:00:15.408344   149   149 W vold    : Failed to LOOP_GET_STATUS64 /dev/block/loop20: No such device or address
+01-01 00:00:15.408987   149   149 W vold    : Failed to LOOP_GET_STATUS64 /dev/block/loop19: No such device or address
+01-01 00:00:15.409666   149   149 W vold    : Failed to LOOP_GET_STATUS64 /dev/block/loop18: No such device or address
+01-01 00:00:15.410274   149   149 W vold    : Failed to LOOP_GET_STATUS64 /dev/block/loop17: No such device or address
+01-01 00:00:15.410879   149   149 W vold    : Failed to LOOP_GET_STATUS64 /dev/block/loop16: No such device or address
+01-01 00:00:15.411482   149   149 W vold    : Failed to LOOP_GET_STATUS64 /dev/block/loop10: No such device or address
+01-01 00:00:15.412511   149   149 D vold    : Found unmanaged loop device at /dev/block/loop3 named apex:
+01-01 00:00:15.413177   149   149 W vold    : Failed to LOOP_GET_STATUS64 /dev/block/loop12: No such device or address
+01-01 00:00:15.413846   149   149 D vold    : Found unmanaged loop device at /dev/block/loop5 named apex:
+01-01 00:00:15.414497   149   149 W vold    : Failed to LOOP_GET_STATUS64 /dev/block/loop14: No such device or address
+01-01 00:00:15.415175   149   149 W vold    : Failed to LOOP_GET_STATUS64 /dev/block/loop7: No such device or address
+01-01 00:00:15.415822   149   149 W vold    : Failed to LOOP_GET_STATUS64 /dev/block/loop9: No such device or address
+01-01 00:00:15.427312   149   149 D vold    : Found unmanaged loop device at /dev/block/loop0 named apex:
+01-01 00:00:15.432333   149   149 D vold    : Found unmanaged loop device at /dev/block/loop2 named apex:
+01-01 00:00:15.433039   149   149 W vold    : Failed to LOOP_GET_STATUS64 /dev/block/loop11: No such device or address
+01-01 00:00:15.433723   149   149 D vold    : Found unmanaged loop device at /dev/block/loop4 named apex:
+01-01 00:00:15.434386   149   149 W vold    : Failed to LOOP_GET_STATUS64 /dev/block/loop13: No such device or address
+01-01 00:00:15.435129   149   149 W vold    : Failed to LOOP_GET_STATUS64 /dev/block/loop6: No such device or address
+01-01 00:00:15.435825   149   149 W vold    : Failed to LOOP_GET_STATUS64 /dev/block/loop15: No such device or address
+--------- switch to main
+01-01 00:00:15.439218   154   154 E cutils-trace: Error opening trace file: Permission denied (13)
+--------- switch to system
+01-01 00:00:15.440943   149   149 W vold    : Failed to LOOP_GET_STATUS64 /dev/block/loop8: No such device or address
+01-01 00:00:15.441682   149   149 D vold    : Found unmanaged loop device at /dev/block/loop1 named apex:
+--------- switch to main
+01-01 00:00:15.480784   154   154 I HidlServiceManagement: Registered android.hardware.keymaster@4.1::IKeymasterDevice/default (start delay of 844ms)
+01-01 00:00:15.483427   154   154 I HidlServiceManagement: Removing namespace from process name android.hardware.keymaster@4.1-service to keymaster@4.1-service.
+01-01 00:00:15.504923   145   145 I hw-BpHwBinder: onLastStrongRef automatically unlinking death recipients
+01-01 00:00:15.512889   145   145 I hwservicemanager: getTransport: Cannot find entry android.hardware.keymaster@3.0::IKeymasterDevice/default in either framework or device manifest.
+--------- switch to system
+01-01 00:00:15.526186   149   149 D vold    : VoldNativeService::start() completed OK
+--------- switch to main
+01-01 00:00:16.576910     1     1 W libc    : Unable to set property "ro.boottime.init.mount.vendor" to "110": error code: 0xb
+01-01 00:00:17.290268     1     1 W libc    : Unable to set property "ro.boottime.init.mount.product" to "111": error code: 0xb
+01-01 00:00:17.746862     1     1 W libc    : Unable to set property "ro.boottime.init.mount.system_ext" to "48": error code: 0xb
+01-01 00:00:18.291027     1     1 W libc    : Unable to set property "ro.boottime.init.fsck.metadata" to "248": error code: 0xb

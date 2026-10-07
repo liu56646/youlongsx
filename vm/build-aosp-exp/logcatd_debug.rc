@@ -1,0 +1,21 @@
+# VMHost 调试版 logcatd：把 guest 的 logcat 直接灌到 /dev/kmsg（-> 串口）。
+#
+# 与 AOSP 原版的差别：
+#   1) 命令去掉 -f /data/misc/logd/logcat（改为输出到 stdio）+ stdio_to_kmsg
+#   2) 去掉 disabled，改由 on boot 显式启动（不依赖 persist 属性触发）
+#   3) 只回放 crash/system 两个缓冲区（**故意去掉 main**）：
+#      - main 是所有 app 的哔噪（chatty/dhcpclient/permissioncontroller/bluetooth/...），
+#        在这台 TCG 上 guest 只有 ~50-100x 慢，logd+logcat+printk->串口 自身的 CPU/IO 就是
+#        实打实的负担，会挤掉 system_server 启动的 CPU 时间。
+#      - system_server 的 Slog 全部写 LOG_ID_SYSTEM，所以 SystemServerTiming /
+#        ActivityManager / Watchdog 等关键行**都还在**；native abort / async_safe 走 crash 缓冲区。
+service logcatd /system/bin/logcat -b crash,system -v threadtime -D
+    class late_start
+    user logd
+    group logd root log
+    stdio_to_kmsg
+    writepid /dev/cpuset/system-background/tasks
+    oom_score_adjust -600
+
+on boot
+    start logcatd

@@ -1,0 +1,8 @@
+service vendor.gralloc-3-0 /system/bin/sh /vendor/bin/vmhost_gralloc_wrap.sh
+    interface android.hardware.graphics.allocator@3.0::IAllocator default
+    class hal animation
+    user system
+    group graphics drmrpc
+    capabilities SYS_NICE
+    seclabel u:r:hal_graphics_allocator_default:s0
+    onrestart restart surfaceflinger

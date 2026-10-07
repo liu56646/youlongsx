@@ -1,0 +1,46 @@
+# ============================================================================
+# 本仓以 k:\youlongsx 为根：vm（Kotlin/Gradle 工程）+ docs + AOSP TCG 实验脚本。
+# 工作区总计约 26GB，其中约 24GB 是镜像 / 核心转储 / 预编译二进制 / 打包产物 /
+# 反编译工作区，全部不入库（可重建；且多为 2-4GB 单文件，入库会让仓库迅速爆掉）。
+# ============================================================================
+
+# --- 反编译与重建产物（约 2.4GB）---
+/project/
+/build/
+/unpacked/
+/source.apk
+/build.log
+/decode.log
+
+# --- 第三方二进制工具（可重新下载，23MB）---
+/tools/*.jar
+
+# --- vm 工程：Gradle 构建/打包产物（build/ 与 .cxx/ 在任意层级都算产物）---
+build/
+.cxx/
+/vm/dist/
+/vm/.kotlin/
+/vm/local.properties
+
+# --- vm/build-aosp-exp：镜像 / 核心转储 / 运行日志 / 预编译二进制 ---
+# （保留 .sh/.py/.java/.c/.cpp/.aidl/.rc/.ps1 等源码与脚本）
+/vm/build-aosp-exp/**/*.img
+/vm/build-aosp-exp/**/*.bin
+/vm/build-aosp-exp/**/*.gz
+/vm/build-aosp-exp/**/*.log
+/vm/build-aosp-exp/**/*.err
+/vm/build-aosp-exp/**/*.out
+/vm/build-aosp-exp/**/*.so
+/vm/build-aosp-exp/**/*.class
+/vm/build-aosp-exp/**/*.dex
+/vm/build-aosp-exp/**/*.jar
+/vm/build-aosp-exp/qemu-system-aarch64
+/vm/build-aosp-exp/dumper
+/vm/build-aosp-exp/rd/init
+
+# --- 根目录排障临时产物（tmp 脚本 / 日志 / 预编译 so / 转储）---
+/tmp_*
+/*.log
+/*.so
+/ptrace_catcher
+/g46_tail.txt

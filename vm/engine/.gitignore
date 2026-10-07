@@ -1,0 +1,2 @@
+# QEMU 预编译静态产物（由 scripts/package_qemu_static.sh 生成，约 160 MB）
+/src/main/cpp/prebuilt/

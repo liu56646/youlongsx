@@ -1,0 +1,49 @@
+QPID=11101
+=== 发 SIGABRT ===
+=== crash_installed ===
+installed exe_base=0x5cc4eb0000
+=== qemu_crash.txt ===
+SIGNAL=6 si_code=0 si_addr=0x2b59 exe_base=0x5cc4eb0000
+PC=0x7ce7d76e64 PC_off=0x2022ec6e64
+LR=0x5cc57fdba0 LR_off=0x94dba0
+SP=0xb400007c66577be0 FAULT=0x0
+unwind_frames=34
+#00 abs=0x5cc554bdcc off=0x69bdcc
+#01 abs=0x7ce9269848 off=0x20243b9848
+#02 abs=0x7ce7d76e64 off=0x2022ec6e64
+#03 abs=0x5cc57fdba0 off=0x94dba0
+#04 abs=0x5cc57fd938 off=0x94d938
+#05 abs=0x5cc5800abc off=0x950abc
+#06 abs=0x5cc554bdcc off=0x69bdcc
+#07 abs=0x7ce9269848 off=0x20243b9848
+#08 abs=0x5cc57fe11c off=0x94e11c
+#09 abs=0x5cc57fd918 off=0x94d918
+#10 abs=0x5cc5800abc off=0x950abc
+#11 abs=0x5cc554bdcc off=0x69bdcc
+#12 abs=0x7ce9269848 off=0x20243b9848
+#13 abs=0x5cc57fe11c off=0x94e11c
+#14 abs=0x5cc57fd918 off=0x94d918
+#15 abs=0x5cc5800abc off=0x950abc
+#16 abs=0x5cc554bdcc off=0x69bdcc
+#17 abs=0x7ce9269848 off=0x20243b9848
+#18 abs=0x5cc57fe11c off=0x94e11c
+#19 abs=0x5cc57fd918 off=0x94d918
+#20 abs=0x5cc5800abc off=0x950abc
+#21 abs=0x5cc554bdcc off=0x69bdcc
+#22 abs=0x7ce9269848 off=0x20243b9848
+#23 abs=0x5cc57fe11c off=0x94e11c
+#24 abs=0x5cc57fd918 off=0x94d918
+#25 abs=0x5cc5800abc off=0x950abc
+#26 abs=0x5cc554bdcc off=0x69bdcc
+#27 abs=0x7ce9269848 off=0x20243b9848
+#28 abs=0x5cc57fe11c off=0x94e11c
+#29 abs=0x5cc57fd918 off=0x94d918
+#30 abs=0x5cc5800abc off=0x950abc
+#31 abs=0x5cc554bdcc off=0x69bdcc
+#32 abs=0x7ce9269848 off=0x20243b9848
+#33 abs=0x5cc57fe11c off=0x94e11c
+=== guest tail ===
+[    7.735639] hub 3-0:1.0: USB hub found
+[    7.735994] hub 3-0:1.0: 8 ports detected
+[    7.995111] virtio_blk virtio0: [vda] 6313984 512-byte logical blocks (3.23 GB/3.01 GiB)
+DONE

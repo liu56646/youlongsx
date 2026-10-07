@@ -1,0 +1,344 @@
+QEMU 2.12.0 monitor - type 'help' for more information
+(qemu) i[K[Din[K[D[Dinf[K[D[D[Dinfo[K[D[D[D[Dinfo [K[D[D[D[D[Dinfo q[K[D[D[D[D[D[Dinfo qt[K[D[D[D[D[D[D[Dinfo qtr[K[D[D[D[D[D[D[D[Dinfo qtre[K[D[D[D[D[D[D[D[D[Dinfo qtree[K
+bus: main-system-bus
+  type System
+  dev: virtio-mmio, id ""
+    gpio-out "sysbus-irq" 1
+    format_transport_address = true
+    mmio 000000000a003e00/0000000000000200
+    bus: virtio-mmio-bus.31
+      type virtio-mmio-bus
+      dev: virtio-blk-device, id ""
+        drive = "vendor"
+        logical_block_size = 512 (0x200)
+        physical_block_size = 512 (0x200)
+        min_io_size = 0 (0x0)
+        opt_io_size = 0 (0x0)
+        discard_granularity = 4294967295 (0xffffffff)
+        write-cache = "auto"
+        share-rw = false
+        rerror = "auto"
+        werror = "auto"
+        cyls = 99 (0x63)
+        heads = 16 (0x10)
+        secs = 63 (0x3f)
+        serial = ""
+        config-wce = true
+        scsi = false
+        request-merging = true
+        num-queues = 1 (0x1)
+        queue-size = 128 (0x80)
+        iothread = ""
+        indirect_desc = true
+        event_idx = true
+        notify_on_empty = true
+        any_layout = false
+        iommu_platform = false
+  dev: virtio-mmio, id ""
+    gpio-out "sysbus-irq" 1
+    format_transport_address = true
+    mmio 000000000a003c00/0000000000000200
+    bus: virtio-mmio-bus.30
+      type virtio-mmio-bus
+      dev: virtio-blk-device, id ""
+        drive = "userdata"
+        logical_block_size = 512 (0x200)
+        physical_block_size = 512 (0x200)
+        min_io_size = 0 (0x0)
+        opt_io_size = 0 (0x0)
+        discard_granularity = 4294967295 (0xffffffff)
+        write-cache = "auto"
+        share-rw = false
+        rerror = "auto"
+        werror = "auto"
+        cyls = 8322 (0x2082)
+        heads = 16 (0x10)
+        secs = 63 (0x3f)
+        serial = ""
+        config-wce = true
+        scsi = false
+        request-merging = true
+        num-queues = 1 (0x1)
+        queue-size = 128 (0x80)
+        iothread = ""
+        indirect_desc = true
+        event_idx = true
+        notify_on_empty = true
+        any_layout = false
+        iommu_platform = false
+  dev: virtio-mmio, id ""
+    gpio-out "sysbus-irq" 1
+    format_transport_address = true
+    mmio 000000000a003a00/0000000000000200
+    bus: virtio-mmio-bus.29
+      type virtio-mmio-bus
+      dev: virtio-blk-device, id ""
+        drive = "cache"
+        logical_block_size = 512 (0x200)
+        physical_block_size = 512 (0x200)
+        min_io_size = 0 (0x0)
+        opt_io_size = 0 (0x0)
+        discard_granularity = 4294967295 (0xffffffff)
+        write-cache = "auto"
+        share-rw = false
+        rerror = "auto"
+        werror = "auto"
+        cyls = 32 (0x20)
+        heads = 16 (0x10)
+        secs = 63 (0x3f)
+        serial = ""
+        config-wce = true
+        scsi = false
+        request-merging = true
+        num-queues = 1 (0x1)
+        queue-size = 128 (0x80)
+        iothread = ""
+        indirect_desc = true
+        event_idx = true
+        notify_on_empty = true
+        any_layout = false
+        iommu_platform = false
+  dev: virtio-mmio, id ""
+    gpio-out "sysbus-irq" 1
+    format_transport_address = true
+    mmio 000000000a003800/0000000000000200
+    bus: virtio-mmio-bus.28
+      type virtio-mmio-bus
+      dev: virtio-blk-device, id ""
+        drive = "system"
+        logical_block_size = 512 (0x200)
+        physical_block_size = 512 (0x200)
+        min_io_size = 0 (0x0)
+        opt_io_size = 0 (0x0)
+        discard_granularity = 4294967295 (0xffffffff)
+        write-cache = "auto"
+        share-rw = false
+        rerror = "auto"
+        werror = "auto"
+        cyls = 14786 (0x39c2)
+        heads = 7 (0x7)
+        secs = 61 (0x3d)
+        serial = ""
+        config-wce = true
+        scsi = false
+        request-merging = true
+        num-queues = 1 (0x1)
+        queue-size = 128 (0x80)
+        iothread = ""
+        indirect_desc = true
+        event_idx = true
+        notify_on_empty = true
+        any_layout = false
+        iommu_platform = false
+  dev: virtio-mmio, id ""
+    gpio-out "sysbus-irq" 1
+    format_transport_address = true
+    mmio 000000000a003600/0000000000000200
+    bus: virtio-mmio-bus.27
+      type virtio-mmio-bus
+  dev: virtio-mmio, id ""
+    gpio-out "sysbus-irq" 1
+    format_transport_address = true
+    mmio 000000000a003400/0000000000000200
+    bus: virtio-mmio-bus.26
+      type virtio-mmio-bus
+  dev: virtio-mmio, id ""
+    gpio-out "sysbus-irq" 1
+    format_transport_address = true
+    mmio 000000000a003200/0000000000000200
+    bus: virtio-mmio-bus.25
+      type virtio-mmio-bus
+  dev: virtio-mmio, id ""
+    gpio-out "sysbus-irq" 1
+    format_transport_address = true
+    mmio 000000000a003000/0000000000000200
+    bus: virtio-mmio-bus.24
+      type virtio-mmio-bus
+  dev: virtio-mmio, id ""
+    gpio-out "sysbus-irq" 1
+    format_transport_address = true
+    mmio 000000000a002e00/0000000000000200
+    bus: virtio-mmio-bus.23
+      type virtio-mmio-bus
+  dev: virtio-mmio, id ""
+    gpio-out "sysbus-irq" 1
+    format_transport_address = true
+    mmio 000000000a002c00/0000000000000200
+    bus: virtio-mmio-bus.22
+      type virtio-mmio-bus
+  dev: virtio-mmio, id ""
+    gpio-out "sysbus-irq" 1
+    format_transport_address = true
+    mmio 000000000a002a00/0000000000000200
+    bus: virtio-mmio-bus.21
+      type virtio-mmio-bus
+  dev: virtio-mmio, id ""
+    gpio-out "sysbus-irq" 1
+    format_transport_address = true
+    mmio 000000000a002800/0000000000000200
+    bus: virtio-mmio-bus.20
+      type virtio-mmio-bus
+  dev: virtio-mmio, id ""
+    gpio-out "sysbus-irq" 1
+    format_transport_address = true
+    mmio 000000000a002600/0000000000000200
+    bus: virtio-mmio-bus.19
+      type virtio-mmio-bus
+  dev: virtio-mmio, id ""
+    gpio-out "sysbus-irq" 1
+    format_transport_address = true
+    mmio 000000000a002400/0000000000000200
+    bus: virtio-mmio-bus.18
+      type virtio-mmio-bus
+  dev: virtio-mmio, id ""
+    gpio-out "sysbus-irq" 1
+    format_transport_address = true
+    mmio 000000000a002200/0000000000000200
+    bus: virtio-mmio-bus.17
+      type virtio-mmio-bus
+  dev: virtio-mmio, id ""
+    gpio-out "sysbus-irq" 1
+    format_transport_address = true
+    mmio 000000000a002000/0000000000000200
+    bus: virtio-mmio-bus.16
+      type virtio-mmio-bus
+  dev: virtio-mmio, id ""
+    gpio-out "sysbus-irq" 1
+    format_transport_address = true
+    mmio 000000000a001e00/0000000000000200
+    bus: virtio-mmio-bus.15
+      type virtio-mmio-bus
+  dev: virtio-mmio, id ""
+    gpio-out "sysbus-irq" 1
+    format_transport_address = true
+    mmio 000000000a001c00/0000000000000200
+    bus: virtio-mmio-bus.14
+      type virtio-mmio-bus
+  dev: virtio-mmio, id ""
+    gpio-out "sysbus-irq" 1
+    format_transport_address = true
+    mmio 000000000a001a00/0000000000000200
+    bus: virtio-mmio-bus.13
+      type virtio-mmio-bus
+  dev: virtio-mmio, id ""
+    gpio-out "sysbus-irq" 1
+    format_transport_address = true
+    mmio 000000000a001800/0000000000000200
+    bus: virtio-mmio-bus.12
+      type virtio-mmio-bus
+  dev: virtio-mmio, id ""
+    gpio-out "sysbus-irq" 1
+    format_transport_address = true
+    mmio 000000000a001600/0000000000000200
+    bus: virtio-mmio-bus.11
+      type virtio-mmio-bus
+  dev: virtio-mmio, id ""
+    gpio-out "sysbus-irq" 1
+    format_transport_address = true
+    mmio 000000000a001400/0000000000000200
+    bus: virtio-mmio-bus.10
+      type virtio-mmio-bus
+  dev: virtio-mmio, id ""
+    gpio-out "sysbus-irq" 1
+    format_transport_address = true
+    mmio 000000000a001200/0000000000000200
+    bus: virtio-mmio-bus.9
+      type virtio-mmio-bus
+  dev: virtio-mmio, id ""
+    gpio-out "sysbus-irq" 1
+    format_transport_address = true
+    mmio 000000000a001000/0000000000000200
+    bus: virtio-mmio-bus.8
+      type virtio-mmio-bus
+  dev: virtio-mmio, id ""
+    gpio-out "sysbus-irq" 1
+    format_transport_address = true
+    mmio 000000000a000e00/0000000000000200
+    bus: virtio-mmio-bus.7
+      type virtio-mmio-bus
+  dev: virtio-mmio, id ""
+    gpio-out "sysbus-irq" 1
+    format_transport_address = true
+    mmio 000000000a000c00/0000000000000200
+    bus: virtio-mmio-bus.6
+      type virtio-mmio-bus
+  dev: virtio-mmio, id ""
+    gpio-out "sysbus-irq" 1
+    format_transport_address = true
+    mmio 000000000a000a00/0000000000000200
+    bus: virtio-mmio-bus.5
+      type virtio-mmio-bus
+  dev: virtio-mmio, id ""
+    gpio-out "sysbus-irq" 1
+    format_transport_address = true
+    mmio 000000000a000800/0000000000000200
+    bus: virtio-mmio-bus.4
+      type virtio-mmio-bus
+  dev: virtio-mmio, id ""
+    gpio-out "sysbus-irq" 1
+    format_transport_address = true
+    mmio 000000000a000600/0000000000000200
+    bus: virtio-mmio-bus.3
+      type virtio-mmio-bus
+  dev: virtio-mmio, id ""
+    gpio-out "sysbus-irq" 1
+    format_transport_address = true
+    mmio 000000000a000400/0000000000000200
+    bus: virtio-mmio-bus.2
+      type virtio-mmio-bus
+  dev: virtio-mmio, id ""
+    gpio-out "sysbus-irq" 1
+    format_transport_address = true
+    mmio 000000000a000200/0000000000000200
+    bus: virtio-mmio-bus.1
+      type virtio-mmio-bus
+  dev: virtio-mmio, id ""
+    gpio-out "sysbus-irq" 1
+    format_transport_address = true
+    mmio 000000000a000000/0000000000000200
+    bus: virtio-mmio-bus.0
+      type virtio-mmio-bus
+  dev: goldfish_sync, id ""
+    gpio-out "sysbus-irq" 1
+    mmio 000000000a020000/0000000000002000
+  dev: goldfish_pipe, id ""
+    gpio-out "sysbus-irq" 1
+    mmio 000000000a010000/0000000000002000
+  dev: goldfish-events, id "goldfish-events"
+    gpio-out "sysbus-irq" 1
+    have-dpad = false
+    have-trackball = false
+    have-camera = false
+    have-keyboard = false
+    have-lidswitch = false
+    have-tabletmode = false
+    have-touch = false
+    have-multitouch = true
+    mmio 0000000009040000/0000000000001000
+  dev: goldfish_audio, id ""
+    gpio-out "sysbus-irq" 1
+    input = true
+    output = true
+    mmio 0000000009030000/0000000000000100
+  dev: goldfish_battery, id "goldfish_battery"
+    gpio-out "sysbus-irq" 1
+    mmio 0000000009020000/0000000000001000
+  dev: goldfish_fb, id "goldfish_fb"
+    gpio-out "sysbus-irq" 1
+    mmio 0000000009010000/0000000000000100
+  dev: pl011, id ""
+    gpio-out "sysbus-irq" 1
+    chardev = "serial0"
+    mmio 0000000009000000/0000000000001000
+  dev: arm_gic, id ""
+    gpio-out "sysbus-irq" 4
+    gpio-in "" 160
+    num-cpu = 1 (0x1)
+    num-irq = 160 (0xa0)
+    revision = 2 (0x2)
+    has-security-extensions = false
+    mmio 0000000008000000/0000000000001000
+    mmio 0000000008010000/0000000000002000
+    mmio ffffffffffffffff/0000000000000100
+(qemu) q[K[Dqu[K[D[Dqui[K[D[D[Dquit[K
+EXIT=0

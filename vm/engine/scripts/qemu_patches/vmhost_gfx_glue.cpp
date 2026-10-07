@@ -1,0 +1,483 @@
+// VMHost: 在 QEMU 启动早期把 gfxstream 宿主渲染器拉起来，并注册
+// `pipe:opengles` AndroidPipe 服务。
+//
+// 背景：guest（Android 11）的 hwcomposer 是 EmuHWC2，启动时必须经
+// HostConnection 建立到宿主 gfxstream 的连接（即 pipe:opengles）。宿主没有
+// 渲染器时该管道返回 -1，HWC 致命 abort，init 随即 onrestart restart
+// surfaceflinger，SurfaceFlinger 永远起不来。
+//
+// 上游的做法是在 gfxstream 的 virtio-gpu 后端里
+// （host/virtio-gpu-gfxstream-renderer.cpp）调这几个 API。我们不用 virtio-gpu
+// 那条路，所以在这里手工按同样的顺序拉起：
+//
+//   1. 装 graphics agents —— gfxstream 自带 GfxStreamGraphicsAgentFactory，
+//      给 vm / window / multi_display 三套 agent 都提供了安全实现；
+//      android_startOpenglesRenderer() 会无条件解引用这三个指针，不能传 null。
+//   2. emuglConfig_init(..., "host", ...) —— 明确选宿主 GPU 模式（也就是用
+//      手机自己的系统 libEGL.so / libGLESv2.so，不用 ANGLE/SwiftShader）。
+//   3. android_setOpenglesEmulation(&renderLib) —— 把 RenderLibImpl 注入。
+//      注意：绝不能调 android_initOpenglesEmulation()，那个函数在新构建里直接 abort。
+//      也正因为不调它，静态 sRendererUsesSubWindow 保持默认 false，渲染器走
+//      headless（不需要 ANativeWindow，我们也没有窗口）。
+//   4. android_startOpenglesRenderer() —— 真正建 EGL context / FrameBuffer。
+//   5. android_init_opengles_pipe() —— 注册 AndroidPipe 服务 "opengles"，
+//      必须在 guest 连接之前完成。
+//
+// 整个过程失败也不致命：只打日志并返回非 0，QEMU 继续跑（guest 仍能启动，
+// 只是没有 GPU，行为与接线之前一致），方便逐项排障。
+
+#include <errno.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <android/native_window.h>
+
+// ---------------------------------------------------------- ANativeWindow 桩
+// gfxstream 的 NativeSubWindow_android.cpp / EglOsApi_egl.cpp 引用了这几个
+// ANativeWindow_* 符号，它们只在 libandroid.so 里。但真机上链 libandroid 会把
+// libharfbuzz_ng.so 一起拖进来，而后者依赖 libicu.so，在 app 的 linker namespace
+// 里解析不到，直接 "CANNOT LINK EXECUTABLE"。
+//
+// 我们走的是 headless 路径（渲染器不用子窗口，见下方 sRendererUsesSubWindow
+// 的说明），这几个函数实际不会被调用，给最小实现即可，从而完全不依赖
+// libandroid.so。
+extern "C" {
+void ANativeWindow_acquire(ANativeWindow* window) { (void)window; }
+void ANativeWindow_release(ANativeWindow* window) { (void)window; }
+int32_t ANativeWindow_getWidth(ANativeWindow* window) {
+    (void)window;
+    return 0;
+}
+int32_t ANativeWindow_getHeight(ANativeWindow* window) {
+    (void)window;
+    return 0;
+}
+int32_t ANativeWindow_setBuffersGeometry(ANativeWindow* window, int32_t width,
+                                         int32_t height, int32_t format) {
+    (void)window;
+    (void)width;
+    (void)height;
+    (void)format;
+    return 0;
+}
+}  // extern "C"
+
+// 截图回传（D1a）：
+//   - vmhost_gfx_screenshot_to_file()：从 gfxstream FrameBuffer 取**最新一帧**
+//     （m_lastPostedColorBuffer），按请求缩放后写 PPM 文件；
+//   - 后台线程 vmhost_gfx_screen_thread()：轮询 <frame_dir>/frame.request
+//     （内容 "宽 高"），有请求就截图写 frame.ppm（临时文件 + rename 原子替换），
+//     自增写 frame.seq，再删掉请求文件。App 侧写请求 → 轮询 seq 变化 → 读
+//     frame.ppm 即得当前画面。
+//   B1 模式下 QEMU 是独立子进程，渲染/取帧都在子进程里，所以必须用
+//   "请求文件 + 结果文件"这种文件握手，App 主进程轮询即可，无需额外 IPC。
+//
+// D1f（本版）：改用 Renderer::setPostCallback 直接抓 post 帧像素。
+//   m_lastPostedColorBuffer 只在 rcFBPost 路径更新；若 guest 走 ASG 数据面
+//   （address space graphics，GL 命令不经过 renderControl 的 rc 命令），
+//   getScreenshot 就拿不到帧。而 setPostCallback 在**每次帧显示前**回调并
+//   提供像素拷贝，与传输路径无关。这里把最新一帧存进 s_latest_*，截图线程
+//   从这份拷贝写 PPM，完全绕开 m_lastPostedColorBuffer。
+#include <pthread.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <vector>
+#include <mutex>
+
+// gfxstream
+#include "GfxStreamAgents.h"
+#include "RenderLibImpl.h"
+#include "host-common/opengl/emugl_config.h"
+#include "host-common/opengl/logger.h"
+#include "host-common/opengles-pipe.h"
+#include "host-common/opengles.h"
+// aemu
+#include "host-common/GraphicsAgentFactory.h"
+#include "host-common/multi_display_agent.h"
+#include "host-common/vm_operations.h"
+#include "host-common/window_agent.h"
+
+// 方案 B（virtio-gpu + gfxstream stream_renderer）接线：
+//   - goldfish_virtio_init()：virtio-gpu 设备 realize 时被调用，把 QEMU 的
+//     goldfish pipe 服务 ops 交给 stream_renderer（替代前端的 dlopen 加载）。
+//   - android_init_refcount_pipe()：aemu-host-common（RefcountPipe.cpp）自带真实现，
+//     已随 libaemu-host-common.a 链接，这里只需调用。
+extern "C" {
+#include "gfxstream/virtio-gpu-gfxstream-renderer.h"
+#include "gfxstream/virtio-gpu-gfxstream-renderer-goldfish.h"
+#include "host-common/goldfish_pipe.h"
+#include "host-common/address_space_device.h"
+#include "host-common/refcount-pipe.h"
+}
+
+extern "C" int goldfish_virtio_init(void) {
+    fprintf(stderr, "VMHOSTGFX goldfish_virtio_init: stream_renderer_set_service_ops(QEMU pipe ops)\n");
+    stream_renderer_set_service_ops(goldfish_pipe_get_service_ops());
+    return 0;
+}
+
+// 屏幕尺寸只用于初始化时上报给 guest 的显示驱动，真正的分辨率由 guest 侧
+// 的 SurfaceFlinger/display 决定；这里给一个常见值即可。
+#define VMHOST_GFX_DISPLAY_WIDTH 1080
+#define VMHOST_GFX_DISPLAY_HEIGHT 1920
+#define VMHOST_GFX_GUEST_API_LEVEL 28
+
+static gfxstream::RenderLibImpl* sVmHostRenderLib = nullptr;
+
+// 截图回传线程的帧目录（D1a），由 vmhost_gfx_init 从 VMHOST_FRAME_DIR 填入。
+// vmhost_gfx_screen_thread 定义在文件末尾，这里先给原型。
+static char s_frame_dir[512];
+static void* vmhost_gfx_screen_thread(void* arg);
+// D1f：post callback 定义在文件末尾，vmhost_gfx_init 要先注册它，给原型。
+static void vmhost_gfx_on_post(void* ctx, uint32_t displayId, int width, int height,
+                               int ydir, int format, int type,
+                               unsigned char* pixels);
+
+static void vmhost_gfx_log(const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    fputs("VMHOSTGFX ", stderr);
+    vfprintf(stderr, fmt, ap);
+    fputc('\n', stderr);
+    va_end(ap);
+}
+
+extern "C" int vmhost_gfx_init(void);
+extern "C" int vmhost_gfx_renderer_ready(void);
+
+// GLcommon/GLutils.h（gfxstream translator）：
+//   void setGles2Gles(bool isGles2gles);
+// 强制 guest GLES 直通宿主 GLES。宿主是 Android 的 Adreno GLES，
+// 若保持默认 false（sEgl2Egl=false），translator 会把所有 GLSL shader
+// 交给 ShaderParser 做 GLES→GL 转译（面向 desktop GL 的产物），
+// 在 Adreno 上编译失败：TextureDraw 与 guest 合成 shader 全崩，
+// SurfaceFlinger 合不出帧 → guest 从不 post → 截图永远拿不到画面。
+void setGles2Gles(bool isGles2gles);
+
+
+// 渲染器是否已就绪（供打点/判据 A2 使用）
+extern "C" int vmhost_gfx_renderer_ready(void) {
+    const gfxstream::RendererPtr& renderer = android_getOpenglesRenderer();
+    return renderer ? 1 : 0;
+}
+
+extern "C" int vmhost_gfx_init(void) {
+    if (sVmHostRenderLib) {
+        return 0;
+    }
+
+    // 0. guest GLES 直通宿主 GLES（见 setGles2Gles 声明处的说明）。
+    //    必须在 renderer 启动前设置，且要在 guest 建立 HostConnection 之前。
+    setGles2Gles(true);
+    vmhost_gfx_log("已强制 gles2gles（GLSL 直通宿主，不做 desktop-GL 转译）");
+
+    // 1. agents
+    android::emulation::injectGraphicsAgents(
+            android::emulation::GfxStreamGraphicsAgentFactory());
+    const GraphicsAgents* agents = getGraphicsAgents();
+    if (!agents || !agents->vm || !agents->emu || !agents->multi_display) {
+        vmhost_gfx_log("agents 不完整，放弃启动渲染器");
+        return -1;
+    }
+    vmhost_gfx_log("graphics agents 已注入");
+
+    // 2. emugl 配置：宿主 GPU + 无窗口
+    // uiPreferredBackend 取 0 = WINSYS_GLESBACKEND_PREFERENCE_AUTO
+    // （该枚举定义在 QEMU UI 侧的 android/skin/backend-defs.h，我们不引那个头，
+    //  直接用字面量）。
+    EmuglConfig config;
+    memset(&config, 0, sizeof(config));
+    if (!emuglConfig_init(&config, /*gpu_enabled*/ true, /*gpu_mode*/ "auto",
+                          /*gpu_option*/ "host", /*bitness*/ 64,
+                          /*no_window*/ true, /*blacklisted*/ false,
+                          /*google_apis*/ false,
+                          /*uiPreferredBackend*/ 0,
+                          /*use_host_vulkan*/ false)) {
+        vmhost_gfx_log("emuglConfig_init 失败：%s", config.status);
+        return -1;
+    }
+    emuglConfig_setupEnv(&config);
+    vmhost_gfx_log("emugl 渲染器 = %s",
+                   emuglConfig_renderer_to_string(emuglConfig_get_current_renderer()));
+
+    // 打开 gfxstream 自己的日志。
+    // 注意：上游是在 android_initOpenglesEmulation() 里根据 ANDROID_EMUGL_FINE_LOG /
+    // ANDROID_EMUGL_LOG_PRINT 设这两个 flag 的，而那个函数在新构建里直接 abort
+    // （我们本来就不能调），所以这里显式设。
+    // 打开后 gfxstream 的 coarse/fine 日志会 printf 到 stdout（宿主 stdout 要记得收，
+    // 否则会被丢进 /dev/null）。设 VMHOST_GFX_DEBUG=0 可关掉。
+    if (getenv("VMHOST_GFX_DEBUG") == NULL ||
+        strcmp(getenv("VMHOST_GFX_DEBUG"), "0") != 0) {
+        android_opengl_logger_set_flags(
+                static_cast<AndroidOpenglLoggerFlags>(
+                        OPENGL_LOGGER_DO_FINE_LOGGING |
+                        OPENGL_LOGGER_PRINT_TO_STDOUT));
+        vmhost_gfx_log("gfxstream 详细日志已打开（DO_FINE_LOGGING | PRINT_TO_STDOUT）");
+    }
+
+    // 3. 注入 RenderLib
+    sVmHostRenderLib = new gfxstream::RenderLibImpl();
+    android_setOpenglesEmulation(sVmHostRenderLib, nullptr, nullptr);
+
+    // 4. 启动渲染器
+    int glesMajor = 0;
+    int glesMinor = 0;
+    int ret = android_startOpenglesRenderer(
+            VMHOST_GFX_DISPLAY_WIDTH, VMHOST_GFX_DISPLAY_HEIGHT,
+            /*guestPhoneApi*/ 1, VMHOST_GFX_GUEST_API_LEVEL, agents->vm,
+            agents->emu, agents->multi_display, &glesMajor, &glesMinor);
+    vmhost_gfx_log("android_startOpenglesRenderer ret=%d gles=%d.%d", ret,
+                   glesMajor, glesMinor);
+
+    if (!vmhost_gfx_renderer_ready()) {
+        vmhost_gfx_log("renderer 为空（EGL 没建起来），opengles 管道仍会注册但无法服务");
+    } else {
+        char* vendor = nullptr;
+        char* renderer = nullptr;
+        char* version = nullptr;
+        android_getOpenglesHardwareStrings(&vendor, &renderer, &version);
+        vmhost_gfx_log("GL vendor=[%s] renderer=[%s] version=[%s]",
+                       vendor ? vendor : "(null)", renderer ? renderer : "(null)",
+                       version ? version : "(null)");
+        free(vendor);
+        free(renderer);
+        free(version);
+
+        // D1f：注册 post callback，直接抓每次显示的帧像素（与传输路径无关）。
+        {
+            const gfxstream::RendererPtr& r = android_getOpenglesRenderer();
+            r->setPostCallback(vmhost_gfx_on_post, nullptr, 0,
+                               /*useBgraReadback*/ false);
+            vmhost_gfx_log("已注册 post callback（displayId=0，直接抓帧）");
+        }
+    }
+
+    // 5. 注册 opengles 管道服务（必须在 guest 连接之前）
+    android_init_opengles_pipe();
+    vmhost_gfx_log("opengles 管道服务已注册（renderer_ready=%d）",
+                   vmhost_gfx_renderer_ready());
+
+    // 5b. 方案 B（virtio-gpu）：guest 用 virtio-gpu-pipe 传输。与 emulator 的
+    // stream_renderer_opengles_init() 对齐：
+    //   - recv_mode(2)：opengles 管道切到 virtio-gpu 数据面（guest 不再走
+    //     goldfish pipe 传 GL 命令）；
+    //   - refcount：aemu 自带真实现（RefcountPipe.cpp），注册 refcount 管道。
+    // 注意：**不要**在这里调 address_space_set_vm_operations —— vmhost_pipe_init()
+    // 已经用 vmhost_vm_ops 接好（含 user-backed RAM 映射等真实现），再用 gfxstream
+    // 的 GfxStreamGraphicsAgentFactory 覆盖会把 vm ops 换成一堆空实现，guest 一敲
+    // 地址空间设备的 PING 就崩（实测 SIGSEGV）。
+    // 用 VMHOST_VIRTIO_GPU=1 环境变量开关（d1a.sh 设置），便于回退旧路径。
+    if (getenv("VMHOST_VIRTIO_GPU") != NULL) {
+        android_opengles_pipe_set_recv_mode(2); /* virtio-gpu */
+        vmhost_gfx_log("virtio-gpu 模式：recv_mode=2");
+    }
+    // VMHOST_FIX：guest 的 allocator@3.0-service（gralloc）在 allocateCb 里
+    // qemu_pipe_open_ns("refcount")，host 不注册该服务则 fd<0 -> NO_RESOURCES
+    // -> gralloc 分配失败 -> SF 无 color buffer。aemu 的 RefcountPipe 是真实现，
+    // 无条件注册（与 recv_mode 无关），让 guest 的 refcount 连接成功。
+    android_init_refcount_pipe();
+    vmhost_gfx_log("refcount 管道已注册（guest allocator 依赖）");
+
+    // 6. 截图回传线程（D1a）：读 VMHOST_FRAME_DIR，非空就起后台线程，
+    //    轮询 frame.request → 截图 frame.ppm + frame.seq。B1 子进程模式下
+    //    由 vm_qemu.c spawn 时 setenv 注入，目录即 <dataDir>/logs。
+    {
+        const char* fd = getenv("VMHOST_FRAME_DIR");
+        if (fd != NULL && fd[0] != '\0') {
+            snprintf(s_frame_dir, sizeof(s_frame_dir), "%s", fd);
+            pthread_t tid;
+            if (pthread_create(&tid, NULL, vmhost_gfx_screen_thread, NULL) == 0) {
+                vmhost_gfx_log("截图回传线程已启动（frame_dir=%s）", s_frame_dir);
+            } else {
+                vmhost_gfx_log("截图回传线程启动失败");
+            }
+        }
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------- 截图回传（D1a）
+// 把 gfxstream 的**最新一帧**（m_lastPostedColorBuffer）按 max_w/max_h 等比缩放
+// 后写成一个 P6 PPM 文件。max_w/max_h 任一为 0 表示取原生分辨率。
+// 返回 0 成功；-1 失败。可被后台线程或外部显式调用（排障用）。
+
+// ---- D1f：post callback 抓帧（与传输路径无关）----
+static std::mutex s_latest_mutex;
+static std::vector<uint8_t> s_latest_pixels;
+static int s_latest_w = 0;
+static int s_latest_h = 0;
+static unsigned long long s_latest_seq = 0;
+
+// Renderer::OnPostCallback 签名：每次帧显示前回调，pixels 为帧内容拷贝。
+// 注意 ydir=-1 表示 bottom-to-top（GL 约定），这里翻成 top-to-bottom 存。
+static void vmhost_gfx_on_post(void* ctx, uint32_t displayId, int width, int height,
+                               int ydir, int format, int type,
+                               unsigned char* pixels) {
+    (void)ctx;
+    (void)format;
+    (void)type;
+    if (displayId != 0 || !pixels || width <= 0 || height <= 0) {
+        return;
+    }
+    std::lock_guard<std::mutex> lk(s_latest_mutex);
+    const size_t row = (size_t)width * 4u;
+    const size_t need = row * (size_t)height;
+    if (s_latest_pixels.size() != need) {
+        s_latest_pixels.resize(need);
+    }
+    if (ydir < 0) {
+        for (int y = 0; y < height; y++) {
+            memcpy(s_latest_pixels.data() + (size_t)y * row,
+                   pixels + (size_t)(height - 1 - y) * row, row);
+        }
+    } else {
+        memcpy(s_latest_pixels.data(), pixels, need);
+    }
+    s_latest_w = width;
+    s_latest_h = height;
+    s_latest_seq++;
+}
+
+// 从 post callback 保存的最新帧写 PPM（RGBA -> P6 RGB，top-bottom）。
+// 返回 0 成功；-1 还没有任何 post 帧。
+static int vmhost_gfx_write_latest_ppm(const char* path) {
+    std::lock_guard<std::mutex> lk(s_latest_mutex);
+    if (s_latest_pixels.empty() || s_latest_w <= 0 || s_latest_h <= 0) {
+        return -1;
+    }
+    char tmp[1024];
+    if (snprintf(tmp, sizeof(tmp), "%s.tmp", path) >= (int)sizeof(tmp)) {
+        return -1;
+    }
+    FILE* fp = fopen(tmp, "wb");
+    if (fp == NULL) {
+        return -1;
+    }
+    fprintf(fp, "P6\n%d %d\n255\n", s_latest_w, s_latest_h);
+    const uint8_t* p = s_latest_pixels.data();
+    const size_t row = (size_t)s_latest_w * 4u;
+    for (int y = 0; y < s_latest_h; y++) {
+        const uint8_t* r = p + (size_t)y * row;
+        for (int x = 0; x < s_latest_w; x++) {
+            fputc(r[x * 4 + 0], fp);
+            fputc(r[x * 4 + 1], fp);
+            fputc(r[x * 4 + 2], fp);
+        }
+    }
+    fclose(fp);
+    if (rename(tmp, path) != 0) {
+        unlink(tmp);
+        return -1;
+    }
+    vmhost_gfx_log("screenshot: post-callback %dx%d -> %s (seq=%llu)",
+                   s_latest_w, s_latest_h, path, s_latest_seq);
+    return 0;
+}
+
+extern "C" int vmhost_gfx_screenshot_to_file(const char* path, int max_w, int max_h) {
+    if (path == NULL) {
+        return -1;
+    }
+    /* D1f：优先用 post callback 抓到的最新帧（ASG 数据面也能拿）。
+       拿到了就不再走 getScreenshot（它依赖 rcFBPost 更新的 m_lastPostedColorBuffer）。 */
+    if (vmhost_gfx_write_latest_ppm(path) == 0) {
+        return 0;
+    }
+    if (max_w > 0 || max_h > 0) {
+        vmhost_gfx_log("screenshot: 无 post-callback 帧（fallback 不做缩放）");
+    }
+    const gfxstream::RendererPtr& renderer = android_getOpenglesRenderer();
+    if (!renderer) {
+        vmhost_gfx_log("screenshot: renderer 未就绪");
+        return -1;
+    }
+    unsigned int w = 0, h = 0;
+    size_t cap = 0;
+    // 第一步：pixels=NULL 探尺寸。gfxstream 约定：空间不够返回 -2 并回填需要的字节数。
+    int res = renderer->getScreenshot(3, &w, &h, NULL, &cap, /*displayId*/ 0,
+                                      max_w > 0 ? max_w : 0,
+                                      max_h > 0 ? max_h : 0, /*desiredRotation*/ 0);
+    if (res != -2 || cap == 0 || w == 0 || h == 0) {
+        // res=-1：m_lastPostedColorBuffer 无效，即 guest 还没有成功 post 过帧
+        // （ColorBuffer 在全局 map 里查不到 / handle 为 0）。
+        vmhost_gfx_log("screenshot: 尺寸探测失败 res=%d cap=%zu %ux%u", res, cap, w, h);
+        return -1;
+    }
+    std::vector<uint8_t> pixels(cap);
+    res = renderer->getScreenshot(3, &w, &h, pixels.data(), &cap, /*displayId*/ 0,
+                                  max_w > 0 ? max_w : 0,
+                                  max_h > 0 ? max_h : 0, /*desiredRotation*/ 0);
+    if (res != 0) {
+        vmhost_gfx_log("screenshot: 读取失败 res=%d", res);
+        return -1;
+    }
+    // 先写临时文件再 rename，保证 App 侧永远读不到半帧。
+    char tmp[1024];
+    if (snprintf(tmp, sizeof(tmp), "%s.tmp", path) >= (int)sizeof(tmp)) {
+        return -1;
+    }
+    FILE* fp = fopen(tmp, "wb");
+    if (fp == NULL) {
+        vmhost_gfx_log("screenshot: 无法写 %s", tmp);
+        return -1;
+    }
+    fprintf(fp, "P6\n%u %u\n255\n", w, h);
+    const size_t written = fwrite(pixels.data(), 1, cap, fp);
+    fclose(fp);
+    if (written != cap) {
+        unlink(tmp);
+        return -1;
+    }
+    if (rename(tmp, path) != 0) {
+        unlink(tmp);
+        return -1;
+    }
+    vmhost_gfx_log("screenshot: %ux%u -> %s", w, h, path);
+    return 0;
+}
+
+// 后台线程：轮询 <frame_dir>/frame.request（内容 "宽 高"，可缺省）。
+// 有请求 → 截图写 frame.ppm + frame.seq（自增）→ 删请求文件。
+// 200ms 一轮；QEMU 子进程被 SIGTERM 杀掉时线程自然消亡，无需清理。
+static void* vmhost_gfx_screen_thread(void* arg) {
+    (void)arg;
+    unsigned long long seq = 0;
+    char req[1024], ppm[1024], seqp[1024];
+    for (;;) {
+        if (snprintf(req, sizeof(req), "%s/frame.request", s_frame_dir) >=
+            (int)sizeof(req)) {
+            usleep(200 * 1000);
+            continue;
+        }
+        FILE* fp = fopen(req, "rb");
+        if (fp != NULL) {
+            char buf[64];
+            size_t n = fread(buf, 1, sizeof(buf) - 1, fp);
+            fclose(fp);
+            buf[n] = '\0';
+            int max_w = 0, max_h = 0;
+            if (sscanf(buf, "%d %d", &max_w, &max_h) < 2) {
+                max_w = 0;
+                max_h = 0;
+            }
+            if (snprintf(ppm, sizeof(ppm), "%s/frame.ppm", s_frame_dir) >=
+                    (int)sizeof(ppm) ||
+                vmhost_gfx_screenshot_to_file(ppm, max_w, max_h) == 0) {
+                if (snprintf(seqp, sizeof(seqp), "%s/frame.seq", s_frame_dir) <
+                    (int)sizeof(seqp)) {
+                    seq++;
+                    FILE* sq = fopen(seqp, "wb");
+                    if (sq != NULL) {
+                        fprintf(sq, "%llu\n", seq);
+                        fclose(sq);
+                    }
+                }
+            }
+            unlink(req);
+        }
+        usleep(200 * 1000);
+    }
+    return NULL;
+}

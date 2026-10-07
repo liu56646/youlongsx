@@ -1,0 +1,495 @@
+*** *** *** *** *** *** *** *** *** *** *** *** *** *** *** ***
+Build fingerprint: 'Android/sdk_phone_arm64/emulator_arm64:11/RSR1.210722.013.A4/10160917:userdebug/test-keys'
+Revision: '0'
+ABI: 'arm64'
+Timestamp: 1970-01-01 00:03:12+0000
+pid: 512, tid: 512, name: libgoldfish-ril  >>> /vendor/bin/hw/libgoldfish-rild <<<
+uid: 1001
+signal 6 (SIGABRT), code -1 (SI_QUEUE), fault addr --------
+Abort message: 'HIDL joinRpcThreadpool without calling configureRpcThreadPool.'
+    x0  0000000000000000  x1  0000000000000200  x2  0000000000000006  x3  0000007fc48fb810
+    x4  a953d56ecc64df3f  x5  a953d56ecc64df3f  x6  a953d56ecc64df3f  x7  ff7fff7fff7fff7f
+    x8  00000000000000f0  x9  aa54d66fcd65e040  x10 0000000000000000  x11 ffffffc0ffffffdf
+    x12 0000000000000001  x13 000000000000003f  x14 ff00000000000000  x15 ffffffffffffffff
+    x16 0000007159bd3c80  x17 0000007159bb53f0  x18 000000715b0b2000  x19 0000000000000200
+    x20 0000000000000200  x21 00000000ffffffff  x22 0000000000000003  x23 0000000000000000
+    x24 0000006ec985090c  x25 000000582c19d38a  x26 0000000000000000  x27 0000000000000000
+    x28 0000000000000000  x29 0000007fc48fb890
+    lr  0000007159b68e20  sp  0000007fc48fb7f0  pc  0000007159b68e4c  pst 0000000000001000
+
+backtrace:
+      #00 pc 000000000004de4c  /apex/com.android.runtime/lib64/bionic/libc.so (abort+164) (BuildId: ac8f7173c886715a2f2fec67246e21da)
+      #01 pc 00000000000062b0  /system/lib64/liblog.so (__android_log_default_aborter+12) (BuildId: 53286795d97fe56c1e70dca740895c84)
+      #02 pc 0000000000006e18  /system/lib64/liblog.so (__android_log_assert+336) (BuildId: 53286795d97fe56c1e70dca740895c84)
+      #03 pc 0000000000056e9c  /apex/com.android.vndk.v30/lib64/libhidlbase.so (android::hardware::joinBinderRpcThreadpool()+60) (BuildId: 92e66c58ded5d1f19640e89020c36ad8)
+      #04 pc 00000000000023fc  /vendor/bin/hw/libgoldfish-rild (main+948) (BuildId: abef10578ff7ff199c8ec12eb33a4953)
+      #05 pc 0000000000049418  /apex/com.android.runtime/lib64/bionic/libc.so (__libc_init+108) (BuildId: ac8f7173c886715a2f2fec67246e21da)
+
+memory near x3 ([stack]):
+    0000007fc48fb7f0 000000715c0027f0 0000007fc48fb850  .'.\q...P.......
+    0000007fc48fb800 0000000000000002 0000000000000007  ................
+    0000007fc48fb810 0000000000000000 00000000ffffffff  ................
+    0000007fc48fb820 000003e900000200 0000000000000000  ................
+    0000007fc48fb830 0000000000000000 0000000000000000  ................
+    0000007fc48fb840 0000000000000000 0000000000000000  ................
+    0000007fc48fb850 0000000000000000 0000000000000000  ................
+    0000007fc48fb860 0000000000000000 0000000000000000  ................
+    0000007fc48fb870 0000000000000000 0000000000000000  ................
+    0000007fc48fb880 0000000000000000 0000000000000000  ................
+    0000007fc48fb890 0000007fc48fb8c0 00000071598d72b4  .........r.Yq...
+    0000007fc48fb8a0 0000007159d3944e ffffffffffffffdf  N..Yq...........
+    0000007fc48fb8b0 00000071598d4027 0000007159d3891b  '@.Yq......Yq...
+    0000007fc48fb8c0 0000007fc48fbdc0 00000071598d7e1c  .........~.Yq...
+    0000007fc48fb8d0 0000000000000000 0000000000000000  ................
+    0000007fc48fb8e0 2e74736973726570 2e6761742e676f6c  persist.log.tag.
+
+memory near x16 (/apex/com.android.runtime/lib64/bionic/libc.so):
+    0000007159bd3c60 0000007159bca8d8 0000007159bcb85c  ...Yq...\..Yq...
+    0000007159bd3c70 0000007159b7b524 0000007159bcc020  $..Yq... ..Yq...
+    0000007159bd3c80 0000007159bb53f0 0000007159b68d6c  .S.Yq...l..Yq...
+    0000007159bd3c90 0000007159b655c0 0000007159b5d024  .U.Yq...$..Yq...
+    0000007159bd3ca0 0000007159b59f04 0000007159b59f0c  ...Yq......Yq...
+    0000007159bd3cb0 0000007159b59ed4 0000007159b59e48  ...Yq...H..Yq...
+    0000007159bd3cc0 0000007159b5b434 0000007159b56b8c  4..Yq....k.Yq...
+    0000007159bd3cd0 0000007159b56ad4 0000007159c42098  .j.Yq.... .Yq...
+    0000007159bd3ce0 0000007159b7d174 0000000000000000  t..Yq...........
+    0000007159bd3cf0 0000007159b789c4 0000007159bb5f90  ...Yq...._.Yq...
+    0000007159bd3d00 0000007159bb5990 0000007159bb5a10  .Y.Yq....Z.Yq...
+    0000007159bd3d10 0000007159b65eb0 0000007159b6464c  .^.Yq...LF.Yq...
+    0000007159bd3d20 0000007159b766ac 0000007159bc10bc  .f.Yq......Yq...
+    0000007159bd3d30 0000007159b91924 0000007159b921ac  $..Yq....!.Yq...
+    0000007159bd3d40 0000007159b64ae0 0000000000000000  .J.Yq...........
+    0000007159bd3d50 0000000000000000 0000007159b56014  .........`.Yq...
+
+memory near x17 (/apex/com.android.runtime/lib64/bionic/libc.so):
+    0000007159bb53d0 d4000001d2801ba8 da809400b140041f  ..........@.....
+    0000007159bb53e0 d65f03c054fffe08 d503201fd503201f  ...T.._.. ... ..
+    0000007159bb53f0 d4000001d28015c8 da809400b140041f  ..........@.....
+    0000007159bb5400 d65f03c054fffd08 d503201fd503201f  ...T.._.. ... ..
+    0000007159bb5410 d4000001d2801608 da809400b140041f  ..........@.....
+    0000007159bb5420 d65f03c054fffc08 d503201fd503201f  ...T.._.. ... ..
+    0000007159bb5430 d4000001d28015e8 da809400b140041f  ..........@.....
+    0000007159bb5440 d65f03c054fffb08 d503201fd503201f  ...T.._.. ... ..
+    0000007159bb5450 d4000001d2801628 da809400b140041f  (.........@.....
+    0000007159bb5460 d65f03c054fffa08 d503201fd503201f  ...T.._.. ... ..
+    0000007159bb5470 d4000001d2801288 da809400b140041f  ..........@.....
+    0000007159bb5480 d65f03c054fff908 d503201fd503201f  ...T.._.. ... ..
+    0000007159bb5490 d4000001d28012c8 da809400b140041f  ..........@.....
+    0000007159bb54a0 d65f03c054fff808 d503201fd503201f  ...T.._.. ... ..
+    0000007159bb54b0 d4000001d2801aa8 da809400b140041f  ..........@.....
+    0000007159bb54c0 d65f03c054fff708 d503201fd503201f  ...T.._.. ... ..
+
+memory near x18:
+    000000715b0b1fe0 ---------------- ----------------  ................
+    000000715b0b1ff0 ---------------- ----------------  ................
+    000000715b0b2000 0000000000000000 0000000000000000  ................
+    000000715b0b2010 0000000000000000 0000000000000000  ................
+    000000715b0b2020 0000000000000000 0000000000000000  ................
+    000000715b0b2030 0000000000000000 0000000000000000  ................
+    000000715b0b2040 0000000000000000 0000000000000000  ................
+    000000715b0b2050 0000000000000000 0000000000000000  ................
+    000000715b0b2060 0000000000000000 0000000000000000  ................
+    000000715b0b2070 0000000000000000 0000000000000000  ................
+    000000715b0b2080 0000000000000000 0000000000000000  ................
+    000000715b0b2090 0000000000000000 0000000000000000  ................
+    000000715b0b20a0 0000000000000000 0000000000000000  ................
+    000000715b0b20b0 0000000000000000 0000000000000000  ................
+    000000715b0b20c0 0000000000000000 0000000000000000  ................
+    000000715b0b20d0 0000000000000000 0000000000000000  ................
+
+memory near x21:
+    00000000ffffffd8 ---------------- ----------------  ................
+    00000000ffffffe8 ---------------- ----------------  ................
+    00000000fffffff8 ---------------- ----------------  ................
+    0000000100000008 ---------------- ----------------  ................
+    0000000100000018 ---------------- ----------------  ................
+    0000000100000028 ---------------- ----------------  ................
+    0000000100000038 ---------------- ----------------  ................
+    0000000100000048 ---------------- ----------------  ................
+    0000000100000058 ---------------- ----------------  ................
+    0000000100000068 ---------------- ----------------  ................
+    0000000100000078 ---------------- ----------------  ................
+    0000000100000088 ---------------- ----------------  ................
+    0000000100000098 ---------------- ----------------  ................
+    00000001000000a8 ---------------- ----------------  ................
+    00000001000000b8 ---------------- ----------------  ................
+    00000001000000c8 ---------------- ----------------  ................
+
+memory near x24 (/vendor/lib64/libgoldfish-ril.so):
+    0000006ec98508e8 540000e1eb09011f a9434ff42a1303e0  .......T...*.OC.
+    0000006ec98508f8 a9417bfdf94013f5 d65f03c0910103ff  ..@..{A......._.
+    0000006ec9850908 d10283ff94001f92 a9056ffca9047bfd  .........{...o..
+    0000006ec9850918 a9075ff8a90667fa a9094ff4a90857f6  .g..._...W...O..
+    0000006ec9850928 d53bd05b910103fd f9414b39d0000059  ....[.;.Y...9KA.
+    0000006ec9850938 d0ffffd5f9401769 f0ffffd6f0ffffd7  i.@.............
+    0000006ec9850948 aa0203f3f0ffffda 6f00e4002a0103f4  ...........*...o
+    0000006ec9850958 912b36b5f0000048 9137fed6913b4af7  H....6+..J;...7.
+    0000006ec9850968 f0000058f000005c f81f83a991380f5a  \...X...Z.8.....
+    0000006ec9850978 f9001bfff903e900 3d8003e0ad0083e0  ...............=
+    0000006ec9850988 aa1303e12a1403e0 9400204faa1503e2  ...*........O ..
+    0000006ec9850998 7100411f51018c08 10000089540005a8  ...Q.A.q...T....
+    0000006ec98509a8 8b0a092938686aea f9400324d61f0120  .jh8)... ...$.@.
+    0000006ec98509b8 52800020d0ffffc3 aa1603e252800081  .... ..R...R....
+    0000006ec98509c8 94001f49911c4463 f940032017ffffee  cD..I....... .@.
+    0000006ec98509d8 b907830094002042 f0ffffc334000740  B ......@..4....
+
+memory near x25 (/vendor/bin/hw/libgoldfish-rild):
+    000000582c19d368 696e495f4c495200 3d20636772612074  .RIL_Init argc =
+    000000582c19d378 65696c6320642520 25203d206449746e   %d clientId = %
+    000000582c19d388 5200444c49520073 0074696e495f4c49  s.RILD.RIL_Init.
+    000000582c19d398 626d754e2078614d 697220666f207265  Max Number of ri
+    000000582c19d3a8 707573207327646c 6920646574726f70  ld's supported i
+    000000582c19d3b8 2d00006425203a73 520073257325002d  s: %d..--.%s%s.R
+    000000582c19d3c8 495f5041535f4c49 696665642074696e  IL_SAP_Init defi
+    000000582c19d3d8 6e2073612064656e 25206e69206c6c75  ned as null in %
+    000000582c19d3e8 4e20504153202e73 6c6261737520746f  s. SAP Not usabl
+    000000582c19d3f8 725f4c4952000a65 5f72657473696765  e..RIL_register_
+    000000582c19d408 632074656b636f73 646574656c706d6f  socket completed
+    000000582c19d418 646e657600632d00 2e646c69722e726f  .-c.vendor.rild.
+    000000582c19d428 006874617062696c 0000000001000020  libpath. .......
+    000000582c19d438 0000000000000000 0000000000000004  ................
+    000000582c19d448 0000000000000000 0000000000000000  ................
+    000000582c19d458 0000000000000000 0000000000000000  ................
+
+memory near x29 ([stack]):
+    0000007fc48fb870 0000000000000000 0000000000000000  ................
+    0000007fc48fb880 0000000000000000 0000000000000000  ................
+    0000007fc48fb890 0000007fc48fb8c0 00000071598d72b4  .........r.Yq...
+    0000007fc48fb8a0 0000007159d3944e ffffffffffffffdf  N..Yq...........
+    0000007fc48fb8b0 00000071598d4027 0000007159d3891b  '@.Yq......Yq...
+    0000007fc48fb8c0 0000007fc48fbdc0 00000071598d7e1c  .........~.Yq...
+    0000007fc48fb8d0 0000000000000000 0000000000000000  ................
+    0000007fc48fb8e0 2e74736973726570 2e6761742e676f6c  persist.log.tag.
+    0000007fc48fb8f0 0000676f6c62696c 0000000000000000  liblog..........
+    0000007fc48fb900 0000000000000000 0000000000000000  ................
+    0000007fc48fb910 8020000000000000 8020080280200802  ...... ... ... .
+    0000007fc48fb920 4000000000000000 4000000040000000  .......@...@...@
+    0000007fc48fb930 0000000000000000 0000000000000000  ................
+    0000007fc48fb940 8020080280200802 8020080280200802  .. ... ... ... .
+    0000007fc48fb950 000000582c19d38a 0000000000000000  ...,X...........
+    0000007fc48fb960 0000007fc48fb700 8080808080808080  ................
+
+memory near lr (/apex/com.android.runtime/lib64/bionic/libc.so):
+    0000007159b68e00 ad0103e0aa0003f4 ad0303e0ad0403e0  ................
+    0000007159b68e10 b9002bf5ad0203e0 94019669b90033f3  .....+...3..i...
+    0000007159b68e20 911f6108f0fffe88 f9001fffb90037e0  .....a...7......
+    0000007159b68e30 ad40050093407e60 910083e393407e81  `~@...@..~@.....
+    0000007159b68e40 52801e08528000c2 910003e1d4000001  ...R...R........
+    0000007159b68e50 aa1f03e2528000c0 94019755ad0007e0  ...R........U...
+    0000007159b68e60 52800040910063a1 9401974daa1f03e2  .c..@..R....M...
+    0000007159b68e70 9401969b52801580 52801640aa0003f3  ...R........@..R
+    0000007159b68e80 6f00e40094019698 ad0103e0aa0003f4  .......o........
+    0000007159b68e90 ad0303e0ad0403e0 b9002bf5ad0203e0  .............+..
+    0000007159b68ea0 94019647b90033f3 f9001fffb90037e0  .3..G....7......
+    0000007159b68eb0 93407e8193407e60 528000c2910083e3  `~@..~@........R
+    0000007159b68ec0 d400000152801e08 9401973d52800fe0  ...R.......R=...
+    0000007159b68ed0 1401973f2a1f03e3 12800c60aa0003e8  ...*?.......`...
+    0000007159b68ee0 aa0803e12a0103e2 1401973d2a1f03e3  ...*.......*=...
+    0000007159b68ef0 a9017bfdd100c3ff 910043fdf90013f3  .....{.......C..
+
+memory near sp ([stack]):
+    0000007fc48fb7d0 0000000000000003 0000007159d3944e  ........N..Yq...
+    0000007fc48fb7e0 00000071598d4027 0000007159d3891b  '@.Yq......Yq...
+    0000007fc48fb7f0 000000715c0027f0 0000007fc48fb850  .'.\q...P.......
+    0000007fc48fb800 0000000000000002 0000000000000007  ................
+    0000007fc48fb810 0000000000000000 00000000ffffffff  ................
+    0000007fc48fb820 000003e900000200 0000000000000000  ................
+    0000007fc48fb830 0000000000000000 0000000000000000  ................
+    0000007fc48fb840 0000000000000000 0000000000000000  ................
+    0000007fc48fb850 0000000000000000 0000000000000000  ................
+    0000007fc48fb860 0000000000000000 0000000000000000  ................
+    0000007fc48fb870 0000000000000000 0000000000000000  ................
+    0000007fc48fb880 0000000000000000 0000000000000000  ................
+    0000007fc48fb890 0000007fc48fb8c0 00000071598d72b4  .........r.Yq...
+    0000007fc48fb8a0 0000007159d3944e ffffffffffffffdf  N..Yq...........
+    0000007fc48fb8b0 00000071598d4027 0000007159d3891b  '@.Yq......Yq...
+    0000007fc48fb8c0 0000007fc48fbdc0 00000071598d7e1c  .........~.Yq...
+
+memory near pc (/apex/com.android.runtime/lib64/bionic/libc.so):
+    0000007159b68e28 f9001fffb90037e0 ad40050093407e60  .7......`~@...@.
+    0000007159b68e38 910083e393407e81 52801e08528000c2  .~@........R...R
+    0000007159b68e48 910003e1d4000001 aa1f03e2528000c0  ...........R....
+    0000007159b68e58 94019755ad0007e0 52800040910063a1  ....U....c..@..R
+    0000007159b68e68 9401974daa1f03e2 9401969b52801580  ....M......R....
+    0000007159b68e78 52801640aa0003f3 6f00e40094019698  ....@..R.......o
+    0000007159b68e88 ad0103e0aa0003f4 ad0303e0ad0403e0  ................
+    0000007159b68e98 b9002bf5ad0203e0 94019647b90033f3  .....+...3..G...
+    0000007159b68ea8 f9001fffb90037e0 93407e8193407e60  .7......`~@..~@.
+    0000007159b68eb8 528000c2910083e3 d400000152801e08  .......R...R....
+    0000007159b68ec8 9401973d52800fe0 1401973f2a1f03e3  ...R=......*?...
+    0000007159b68ed8 12800c60aa0003e8 aa0803e12a0103e2  ....`......*....
+    0000007159b68ee8 1401973d2a1f03e3 a9017bfdd100c3ff  ...*=........{..
+    0000007159b68ef8 910043fdf90013f3 f9401668d53bd053  .....C..S.;.h.@.
+    0000007159b68f08 f90007e8910003e1 94019737b90003ff  ............7...
+    0000007159b68f18 f9401669b94003e8 7100001ff94007ea  ..@.i.@...@....q
+
+memory near pst:
+    0000000000001000 ---------------- ----------------  ................
+    0000000000001010 ---------------- ----------------  ................
+    0000000000001020 ---------------- ----------------  ................
+    0000000000001030 ---------------- ----------------  ................
+    0000000000001040 ---------------- ----------------  ................
+    0000000000001050 ---------------- ----------------  ................
+    0000000000001060 ---------------- ----------------  ................
+    0000000000001070 ---------------- ----------------  ................
+    0000000000001080 ---------------- ----------------  ................
+    0000000000001090 ---------------- ----------------  ................
+    00000000000010a0 ---------------- ----------------  ................
+    00000000000010b0 ---------------- ----------------  ................
+    00000000000010c0 ---------------- ----------------  ................
+    00000000000010d0 ---------------- ----------------  ................
+    00000000000010e0 ---------------- ----------------  ................
+    00000000000010f0 ---------------- ----------------  ................
+
+memory map (222 entries):
+    00000058'2c19c000-00000058'2c19dfff r--         0      2000  /vendor/bin/hw/libgoldfish-rild (BuildId: abef10578ff7ff199c8ec12eb33a4953)
+    00000058'2c19e000-00000058'2c19efff r-x      2000      1000  /vendor/bin/hw/libgoldfish-rild (BuildId: abef10578ff7ff199c8ec12eb33a4953)
+    00000058'2c19f000-00000058'2c19ffff r--      3000      1000  /vendor/bin/hw/libgoldfish-rild (BuildId: abef10578ff7ff199c8ec12eb33a49)
+    00000058'2c1a0000-00000058'2c1a0fff rw-      3000      1000  /vendor/bin/hw/libgoldfish-rild (BuildId: abef10578ff7ff199c8ec12eb33a49)
+    0000006e'c8749000-0000006e'c8bd5fff ---         0    48d000
+    0000006e'c8bd6000-0000006e'c8bd7fff rw-         0      2000
+    0000006e'c8bd8000-0000006e'c9748fff ---         0    b71000
+    0000006e'c9749000-0000006e'c9749fff ---         0      1000
+    0000006e'c974a000-0000006e'c9845fff rw-         0     fc000  [anon:stack_and_tls:520]
+    0000006e'c9846000-0000006e'c9846fff ---         0      1000
+    0000006e'c9847000-0000006e'c984dfff r--         0      7000  /vendor/lib64/libgoldfish-ril.so (BuildId: 96d9c66718afbcc0753efda4e467cd)
+    0000006e'c984e000-0000006e'c9859fff r-x      7000      c000  /vendor/lib64/libgoldfish-ril.so (BuildId: 96d9c66718afbcc0753efda4e467cd)
+    0000006e'c985a000-0000006e'c985afff r--     13000      1000  /vendor/lib64/libgoldfish-ril.so (BuildId: 96d9c66718afbcc0753efda4e467cd)
+    0000006e'c985b000-0000006e'c985bfff rw-     13000      1000  /vendor/lib64/libgoldfish-ril.so (BuildId: 96d9c66718afbcc0753efda4e467cd)
+    0000006e'c985c000-0000006e'c9861fff rw-         0      6000  [anon:.bss]
+    0000006e'c98a4000-0000006e'c9b64fff ---         0    2c1000  [anon:cfi shadow]
+    0000006e'c9b65000-0000006e'c9b65fff r--         0      1000  [anon:cfi shadow]
+    0000006e'c9b66000-0000006e'c9c19fff ---         0     b4000  [anon:cfi shadow]
+    0000006e'c9c1a000-0000006e'c9c1afff r--         0      1000  [anon:cfi shadow]
+    0000006e'c9c1b000-0000006e'c9c2dfff ---         0     13000  [anon:cfi shadow]
+    0000006e'c9c2e000-0000006e'c9c2efff r--         0      1000  [anon:cfi shadow]
+    0000006e'c9c2f000-0000006f'498a3fff ---         0  7fc75000  [anon:cfi shadow]
+    0000006f'498a4000-0000006f'498aafff ---         0      7000
+    0000006f'498ab000-0000006f'498eafff rw-         0     40000  [anon:scudo:primary]
+    0000006f'498eb000-0000006f'598b1fff ---         0   ffc7000
+    0000006f'598b2000-0000006f'598f1fff rw-         0     40000  [anon:scudo:primary]
+    0000006f'598f2000-0000006f'698acfff ---         0   ffbb000
+    0000006f'698ad000-0000006f'698ecfff rw-         0     40000  [anon:scudo:primary]
+    0000006f'698ed000-0000006f'798affff ---         0   ffc3000
+    0000006f'798b0000-0000006f'798effff rw-         0     40000  [anon:scudo:primary]
+    0000006f'798f0000-0000006f'898abfff ---         0   ffbc000
+    0000006f'898ac000-0000006f'898ebfff rw-         0     40000  [anon:scudo:primary]
+    0000006f'898ec000-0000006f'998a9fff ---         0   ffbe000
+    0000006f'998aa000-0000006f'998e9fff rw-         0     40000  [anon:scudo:primary]
+    0000006f'998ea000-0000006f'a98adfff ---         0   ffc4000
+    0000006f'a98ae000-0000006f'a98edfff rw-         0     40000  [anon:scudo:primary]
+    0000006f'a98ee000-0000006f'b98a9fff ---         0   ffbc000
+    0000006f'b98aa000-0000006f'b98e9fff rw-         0     40000  [anon:scudo:primary]
+    0000006f'b98ea000-00000071'598a3fff ---         0  19ffba000
+    00000071'598a4000-00000071'598a4fff r--         0      1000  /apex/com.android.vndk.v30/lib64/android.hidl.safe_union@1.0.so (BuildId: fa7eab5f929a4042df3ae72ebb572d)
+    00000071'598a5000-00000071'598a5fff r-x      1000      1000  /apex/com.android.vndk.v30/lib64/android.hidl.safe_union@1.0.so (BuildId: fa7eab5f929a4042df3ae72ebb572d)
+    00000071'598a6000-00000071'598a6fff r--      2000      1000  /apex/com.android.vndk.v30/lib64/android.hidl.safe_union@1.0.so (BuildId: fa7eab5f929a4042df3ae72ebb572d)
+    00000071'598d1000-00000071'598d5fff r--         0      5000  /system/lib64/liblog.so (BuildId: 53286795d97fe56c1e70dca740895c84)
+    00000071'598d6000-00000071'598e0fff r-x      5000      b000  /system/lib64/liblog.so (BuildId: 53286795d97fe56c1e70dca740895c84)
+    00000071'598e1000-00000071'598e1fff r--     10000      1000  /system/lib64/liblog.so (BuildId: 53286795d97fe56c1e70dca740895c)
+    00000071'598e2000-00000071'598e2fff rw-     10000      1000  /system/lib64/liblog.so (BuildId: 53286795d97fe56c1e70dca740895c)
+    00000071'59901000-00000071'5990ffff r--         0      f000  /system/lib64/libbase.so (BuildId: 7f81cc97d60164bfae3b52a2cd822f)
+    00000071'59910000-00000071'5993bfff r-x      f000     2c000  /system/lib64/libbase.so (BuildId: 7f81cc97d60164bfae3b52a2cd822f)
+    00000071'5993c000-00000071'5993cfff r--     3b000      1000  /system/lib64/libbase.so (BuildId: 7f81cc97d60164bfae3b52a2cd822f)
+    00000071'5993d000-00000071'5993dfff rw-     3b000      1000  /system/lib64/libbase.so (BuildId: 7f81cc97d60164bfae3b52a2cd822f)
+    00000071'5996b000-00000071'5996cfff r--         0      2000  /system/lib64/libcgrouprc.so (BuildId: d33aac1cf1515f008b25e53652dbb0)
+    00000071'5996d000-00000071'5996dfff r-x      2000      1000  /system/lib64/libcgrouprc.so (BuildId: d33aac1cf1515f008b25e53652dbb0)
+    00000071'5996e000-00000071'5996efff r--      3000      1000  /system/lib64/libcgrouprc.so (BuildId: d33aac1cf1515f008b25e53652dbb0)
+    00000071'5996f000-00000071'5996ffff rw-      3000      1000  /system/lib64/libcgrouprc.so (BuildId: d33aac1cf1515f008b25e53652dbb0)
+    00000071'59998000-00000071'59998fff r--         0      1000  /apex/com.android.runtime/lib64/bionic/libdl_android.so (BuildId: 6e99debc258aff6623677acf51281f)
+    00000071'59999000-00000071'59999fff r-x      1000      1000  /apex/com.android.runtime/lib64/bionic/libdl_android.so (BuildId: 6e99debc258aff6623677acf51281f)
+    00000071'5999a000-00000071'5999afff r--      2000      1000  /apex/com.android.runtime/lib64/bionic/libdl_android.so (BuildId: 6e99debc258aff6623677acf51281f)
+    00000071'599e5000-00000071'599ebfff r--         0      7000  /apex/com.android.vndk.v30/lib64/libcutils.so (BuildId: 92d723fc05d1ce8b034f23283b1262)
+    00000071'599ec000-00000071'599f3fff r-x      7000      8000  /apex/com.android.vndk.v30/lib64/libcutils.so (BuildId: 92d723fc05d1ce8b034f23283b1262)
+    00000071'599f4000-00000071'599f5fff r--      f000      2000  /apex/com.android.vndk.v30/lib64/libcutils.so (BuildId: 92d723fc05d1ce8b034f23283b1262)
+    00000071'599f6000-00000071'599f6fff rw-     10000      1000  /apex/com.android.vndk.v30/lib64/libcutils.so (BuildId: 92d723fc05d1ce8b034f23283b1262)
+    00000071'59a00000-00000071'59a16fff r--         0     17000  /apex/com.android.vndk.v30/lib64/libprocessgroup.so (BuildId: 73c5f79cd3c3ddddf0ec99fa8f5ab9)
+    00000071'59a17000-00000071'59a3bfff r-x     17000     25000  /apex/com.android.vndk.v30/lib64/libprocessgroup.so (BuildId: 73c5f79cd3c3ddddf0ec99fa8f5ab9)
+    00000071'59a3c000-00000071'59a3dfff r--     3c000      2000  /apex/com.android.vndk.v30/lib64/libprocessgroup.so (BuildId: 73c5f79cd3c3ddddf0ec99fa8f5ab9)
+    00000071'59a3e000-00000071'59a3efff rw-     3d000      1000  /apex/com.android.vndk.v30/lib64/libprocessgroup.so (BuildId: 73c5f79cd3c3ddddf0ec99fa8f5ab9)
+    00000071'59a42000-00000071'59a8cfff r--         0     4b000  /system/lib64/libc++.so (BuildId: da087bc6aeeb87276326ccdef0342b)
+    00000071'59a8d000-00000071'59ae5fff r-x     4b000     59000  /system/lib64/libc++.so (BuildId: da087bc6aeeb87276326ccdef0342b)
+    00000071'59ae6000-00000071'59aecfff r--     a4000      7000  /system/lib64/libc++.so (BuildId: da087bc6aeeb87276326ccdef0342b)
+    00000071'59aed000-00000071'59aedfff rw-     aa000      1000  /system/lib64/libc++.so (BuildId: da087bc6aeeb87276326ccdef0342b)
+    00000071'59aee000-00000071'59af0fff rw-         0      3000  [anon:.bss]
+    00000071'59b1b000-00000071'59b55fff r--         0     3b000  /apex/com.android.runtime/lib64/bionic/libc.so (BuildId: ac8f7173c886715a2f2fec67246e21da)
+    00000071'59b56000-00000071'59bd0fff r-x     3b000     7b000  /apex/com.android.runtime/lib64/bionic/libc.so (BuildId: ac8f7173c886715a2f2fec67246e21da)
+    00000071'59bd1000-00000071'59bd4fff r--     b6000      4000  /apex/com.android.runtime/lib64/bionic/libc.so (BuildId: ac8f7173c886715a2f2fec67246e21)
+    00000071'59bd5000-00000071'59bd7fff rw-     b9000      3000  /apex/com.android.runtime/lib64/bionic/libc.so (BuildId: ac8f7173c886715a2f2fec67246e21)
+    00000071'59bd8000-00000071'59bdafff rw-         0      3000  [anon:.bss]
+    00000071'59bdb000-00000071'59bdbfff r--         0      1000  [anon:.bss]
+    00000071'59bdc000-00000071'59be9fff rw-         0      e000  [anon:.bss]
+    00000071'59c0f000-00000071'59c20fff r--         0     12000  /apex/com.android.vndk.v30/lib64/android.hardware.radio.deprecated@1.0.so (BuildId: 46952d8f8d8b49317bcd031b91379f)
+    00000071'59c21000-00000071'59c36fff r-x     12000     16000  /apex/com.android.vndk.v30/lib64/android.hardware.radio.deprecated@1.0.so (BuildId: 46952d8f8d8b49317bcd031b91379f)
+    00000071'59c37000-00000071'59c3afff r--     28000      4000  /apex/com.android.vndk.v30/lib64/android.hardware.radio.deprecated@1.0.so (BuildId: 46952d8f8d8b49317bcd031b91379f)
+    00000071'59c3b000-00000071'59c3bfff rw-     2b000      1000  /apex/com.android.vndk.v30/lib64/android.hardware.radio.deprecated@1.0.so (BuildId: 46952d8f8d8b49317bcd031b91379f)
+    00000071'59c41000-00000071'59c41fff r--         0      1000  /apex/com.android.runtime/lib64/bionic/libdl.so (BuildId: 0ef8b9fd3ba84892809321b735317a)
+    00000071'59c42000-00000071'59c42fff r-x      1000      1000  /apex/com.android.runtime/lib64/bionic/libdl.so (BuildId: 0ef8b9fd3ba84892809321b735317a)
+    00000071'59c43000-00000071'59c43fff r--      2000      1000  /apex/com.android.runtime/lib64/bionic/libdl.so (BuildId: 0ef8b9fd3ba84892809321b735317a)
+    00000071'59c44000-00000071'59c44fff ---         0      1000
+    00000071'59c45000-00000071'59c45fff r--         0      1000  [anon:.bss]
+    00000071'59c94000-00000071'59cb3fff r--         0     20000  /vendor/lib64/libril-goldfish-fork.so (BuildId: b67571c5acb8659417e87280734e6e)
+    00000071'59cb4000-00000071'59cdafff r-x     20000     27000  /vendor/lib64/libril-goldfish-fork.so (BuildId: b67571c5acb8659417e87280734e6e)
+    00000071'59cdb000-00000071'59cddfff r--     47000      3000  /vendor/lib64/libril-goldfish-fork.so (BuildId: b67571c5acb8659417e87280734e6e)
+    00000071'59cde000-00000071'59cdffff rw-     49000      2000  /vendor/lib64/libril-goldfish-fork.so (BuildId: b67571c5acb8659417e87280734e6e)
+    00000071'59d06000-00000071'59d4bfff r--         0     46000  /apex/com.android.vndk.v30/lib64/libhidlbase.so (BuildId: 92e66c58ded5d1f19640e89020c36ad8)
+    00000071'59d4c000-00000071'59db1fff r-x     46000     66000  /apex/com.android.vndk.v30/lib64/libhidlbase.so (BuildId: 92e66c58ded5d1f19640e89020c36ad8)
+    00000071'59db2000-00000071'59dbcfff r--     ac000      b000  /apex/com.android.vndk.v30/lib64/libhidlbase.so (BuildId: 92e66c58ded5d1f19640e89020c36a)
+    00000071'59dbd000-00000071'59dbefff rw-     b6000      2000  /apex/com.android.vndk.v30/lib64/libhidlbase.so (BuildId: 92e66c58ded5d1f19640e89020c36a)
+    00000071'59dc3000-00000071'59e3efff r--         0     7c000  /apex/com.android.vndk.v30/lib64/android.hardware.radio@1.0.so (BuildId: 83e7b81197a05123b57005f6653d62)
+    00000071'59e3f000-00000071'59f6dfff r-x     7c000    12f000  /apex/com.android.vndk.v30/lib64/android.hardware.radio@1.0.so (BuildId: 83e7b81197a05123b57005f6653d62)
+    00000071'59f6e000-00000071'59f7efff r--    1ab000     11000  /apex/com.android.vndk.v30/lib64/android.hardware.radio@1.0.so (BuildId: 83e7b81197a05123b57005f6653d62)
+    00000071'59f7f000-00000071'59f7ffff rw-    1bb000      1000  /apex/com.android.vndk.v30/lib64/android.hardware.radio@1.0.so (BuildId: 83e7b81197a05123b57005f6653d62)
+    00000071'59f83000-00000071'59f91fff r--         0      f000  /apex/com.android.vndk.v30/lib64/libbase.so (BuildId: 80f255c2fa17369bce8002e5e367ad)
+    00000071'59f92000-00000071'59fbdfff r-x      f000     2c000  /apex/com.android.vndk.v30/lib64/libbase.so (BuildId: 80f255c2fa17369bce8002e5e367ad)
+    00000071'59fbe000-00000071'59fbefff r--     3b000      1000  /apex/com.android.vndk.v30/lib64/libbase.so (BuildId: 80f255c2fa17369bce8002e5e367ad)
+    00000071'59fbf000-00000071'59fbffff rw-     3b000      1000  /apex/com.android.vndk.v30/lib64/libbase.so (BuildId: 80f255c2fa17369bce8002e5e367ad)
+    00000071'59fcc000-00000071'59fcdfff r--         0      2000  /vendor/lib64/librilutils.so (BuildId: 1f30ab294a41761bf9558dbe9379ff)
+    00000071'59fce000-00000071'59fcefff r-x      2000      1000  /vendor/lib64/librilutils.so (BuildId: 1f30ab294a41761bf9558dbe9379ff)
+    00000071'59fcf000-00000071'59fcffff r--      3000      1000  /vendor/lib64/librilutils.so (BuildId: 1f30ab294a41761bf9558dbe9379ff)
+    00000071'59fd3000-00000071'5a036fff rw-         0     64000  [anon:linker_alloc]
+    00000071'5a037000-00000071'5a037fff r--         0      1000  /system/lib64/libvndksupport.so (BuildId: 463176270fa0700248fc504de30302)
+    00000071'5a038000-00000071'5a038fff r-x      1000      1000  /system/lib64/libvndksupport.so (BuildId: 463176270fa0700248fc504de30302)
+    00000071'5a039000-00000071'5a039fff r--      2000      1000  /system/lib64/libvndksupport.so (BuildId: 463176270fa0700248fc504de30302)
+    00000071'5a03a000-00000071'5a03afff rw-      2000      1000  /system/lib64/libvndksupport.so (BuildId: 463176270fa0700248fc504de30302)
+    00000071'5a061000-00000071'5a06ffff r--         0      f000  /apex/com.android.vndk.v30/lib64/libutils.so (BuildId: e20dd469139162d0c9d1dc16a708a6)
+    00000071'5a070000-00000071'5a07cfff r-x      f000      d000  /apex/com.android.vndk.v30/lib64/libutils.so (BuildId: e20dd469139162d0c9d1dc16a708a6)
+    00000071'5a07d000-00000071'5a07dfff r--     1c000      1000  /apex/com.android.vndk.v30/lib64/libutils.so (BuildId: e20dd469139162d0c9d1dc16a708a6)
+    00000071'5a07e000-00000071'5a07efff rw-     1c000      1000  /apex/com.android.vndk.v30/lib64/libutils.so (BuildId: e20dd469139162d0c9d1dc16a708a6)
+    00000071'5a095000-00000071'5a124fff r--         0     90000  /apex/com.android.vndk.v30/lib64/android.hardware.radio@1.5.so (BuildId: 9300bccc327fe4e9f4bb26134a4bdf)
+    00000071'5a125000-00000071'5a215fff r-x     90000     f1000  /apex/com.android.vndk.v30/lib64/android.hardware.radio@1.5.so (BuildId: 9300bccc327fe4e9f4bb26134a4bdf)
+    00000071'5a216000-00000071'5a22ffff r--    181000     1a000  /apex/com.android.vndk.v30/lib64/android.hardware.radio@1.5.so (BuildId: 9300bccc327fe4e9f4bb26134a4bdf)
+    00000071'5a230000-00000071'5a230fff rw-    19a000      1000  /apex/com.android.vndk.v30/lib64/android.hardware.radio@1.5.so (BuildId: 9300bccc327fe4e9f4bb26134a4bdf)
+    00000071'5a26e000-00000071'5a270fff r--         0      3000  /apex/com.android.vndk.v30/lib64/libhardware_legacy.so (BuildId: 0dc4deb796119f71981a74968aca31)
+    00000071'5a271000-00000071'5a272fff r-x      3000      2000  /apex/com.android.vndk.v30/lib64/libhardware_legacy.so (BuildId: 0dc4deb796119f71981a74968aca31)
+    00000071'5a273000-00000071'5a273fff r--      5000      1000  /apex/com.android.vndk.v30/lib64/libhardware_legacy.so (BuildId: 0dc4deb796119f71981a74968aca31)
+    00000071'5a274000-00000071'5a274fff rw-      5000      1000  /apex/com.android.vndk.v30/lib64/libhardware_legacy.so (BuildId: 0dc4deb796119f71981a74968aca31)
+    00000071'5a283000-00000071'5a2cdfff r--         0     4b000  /apex/com.android.vndk.v30/lib64/libc++.so (BuildId: cd7d36d61219edf4da7d788565b373)
+    00000071'5a2ce000-00000071'5a326fff r-x     4b000     59000  /apex/com.android.vndk.v30/lib64/libc++.so (BuildId: cd7d36d61219edf4da7d788565b373)
+    00000071'5a327000-00000071'5a32dfff r--     a4000      7000  /apex/com.android.vndk.v30/lib64/libc++.so (BuildId: cd7d36d61219edf4da7d788565b373)
+    00000071'5a32e000-00000071'5a32efff rw-     aa000      1000  /apex/com.android.vndk.v30/lib64/libc++.so (BuildId: cd7d36d61219edf4da7d788565b373)
+    00000071'5a32f000-00000071'5a331fff rw-         0      3000  [anon:.bss]
+    00000071'5a350000-00000071'5a38bfff r--         0     3c000  /apex/com.android.vndk.v30/lib64/libbinder.so (BuildId: 665054a947e04a4e62ec43364b0c9c)
+    00000071'5a38c000-00000071'5a3c5fff r-x     3c000     3a000  /apex/com.android.vndk.v30/lib64/libbinder.so (BuildId: 665054a947e04a4e62ec43364b0c9c)
+    00000071'5a3c6000-00000071'5a3d2fff r--     76000      d000  /apex/com.android.vndk.v30/lib64/libbinder.so (BuildId: 665054a947e04a4e62ec43364b0c9c)
+    00000071'5a3d3000-00000071'5a3d3fff rw-     82000      1000  /apex/com.android.vndk.v30/lib64/libbinder.so (BuildId: 665054a947e04a4e62ec43364b0c9c)
+    00000071'5a3d4000-00000071'5a3d4fff rw-         0      1000  [anon:.bss]
+    00000071'5a405000-00000071'5a415fff r--         0     11000  /apex/com.android.runtime/lib64/bionic/libm.so (BuildId: e35b2b341204b8f873ffa936612e05)
+    00000071'5a416000-00000071'5a439fff r-x     11000     24000  /apex/com.android.runtime/lib64/bionic/libm.so (BuildId: e35b2b341204b8f873ffa936612e05)
+    00000071'5a43a000-00000071'5a43afff r--     35000      1000  /apex/com.android.runtime/lib64/bionic/libm.so (BuildId: e35b2b341204b8f873ffa936612e05)
+    00000071'5a43b000-00000071'5a43bfff rw-     35000      1000  /apex/com.android.runtime/lib64/bionic/libm.so (BuildId: e35b2b341204b8f873ffa936612e05)
+    00000071'5a44d000-00000071'5a4b3fff r--         0     67000  /apex/com.android.vndk.v30/lib64/android.hardware.radio@1.1.so (BuildId: aa6dc12781c0f33f0b494a4b1f350f)
+    00000071'5a4b4000-00000071'5a562fff r-x     67000     af000  /apex/com.android.vndk.v30/lib64/android.hardware.radio@1.1.so (BuildId: aa6dc12781c0f33f0b494a4b1f350f)
+    00000071'5a563000-00000071'5a573fff r--    116000     11000  /apex/com.android.vndk.v30/lib64/android.hardware.radio@1.1.so (BuildId: aa6dc12781c0f33f0b494a4b1f350f)
+    00000071'5a574000-00000071'5a574fff rw-    126000      1000  /apex/com.android.vndk.v30/lib64/android.hardware.radio@1.1.so (BuildId: aa6dc12781c0f33f0b494a4b1f350f)
+    00000071'5a589000-00000071'5a5f9fff r--         0     71000  /apex/com.android.vndk.v30/lib64/android.hardware.radio@1.2.so (BuildId: cd983c5f8cd989da97fb112dae3d7b)
+    00000071'5a5fa000-00000071'5a6b8fff r-x     71000     bf000  /apex/com.android.vndk.v30/lib64/android.hardware.radio@1.2.so (BuildId: cd983c5f8cd989da97fb112dae3d7b)
+    00000071'5a6b9000-00000071'5a6ccfff r--    130000     14000  /apex/com.android.vndk.v30/lib64/android.hardware.radio@1.2.so (BuildId: cd983c5f8cd989da97fb112dae3d7b)
+    00000071'5a6cd000-00000071'5a6cdfff rw-    143000      1000  /apex/com.android.vndk.v30/lib64/android.hardware.radio@1.2.so (BuildId: cd983c5f8cd989da97fb112dae3d7b)
+    00000071'5a717000-00000071'5a723fff r--         0      d000  /apex/com.android.vndk.v30/lib64/android.system.suspend@1.0.so (BuildId: f55bc5d3aa5b64d4c48aeb9f247e1d)
+    00000071'5a724000-00000071'5a730fff r-x      d000      d000  /apex/com.android.vndk.v30/lib64/android.system.suspend@1.0.so (BuildId: f55bc5d3aa5b64d4c48aeb9f247e1d)
+    00000071'5a731000-00000071'5a733fff r--     1a000      3000  /apex/com.android.vndk.v30/lib64/android.system.suspend@1.0.so (BuildId: f55bc5d3aa5b64d4c48aeb9f247e1d)
+    00000071'5a734000-00000071'5a734fff rw-     1c000      1000  /apex/com.android.vndk.v30/lib64/android.system.suspend@1.0.so (BuildId: f55bc5d3aa5b64d4c48aeb9f247e1d)
+    00000071'5a742000-00000071'5a7acfff r--         0     6b000  /apex/com.android.vndk.v30/lib64/android.hardware.radio@1.3.so (BuildId: 5ba2e51f8c1cc6cb368b0d0c7e2c43)
+    00000071'5a7ad000-00000071'5a85efff r-x     6b000     b2000  /apex/com.android.vndk.v30/lib64/android.hardware.radio@1.3.so (BuildId: 5ba2e51f8c1cc6cb368b0d0c7e2c43)
+    00000071'5a85f000-00000071'5a872fff r--    11d000     14000  /apex/com.android.vndk.v30/lib64/android.hardware.radio@1.3.so (BuildId: 5ba2e51f8c1cc6cb368b0d0c7e2c43)
+    00000071'5a873000-00000071'5a873fff rw-    130000      1000  /apex/com.android.vndk.v30/lib64/android.hardware.radio@1.3.so (BuildId: 5ba2e51f8c1cc6cb368b0d0c7e2c43)
+    00000071'5a889000-00000071'5a903fff r--         0     7b000  /apex/com.android.vndk.v30/lib64/android.hardware.radio@1.4.so (BuildId: 20c4eb703a494d6e386dda1c102177)
+    00000071'5a904000-00000071'5a9d2fff r-x     7b000     cf000  /apex/com.android.vndk.v30/lib64/android.hardware.radio@1.4.so (BuildId: 20c4eb703a494d6e386dda1c102177)
+    00000071'5a9d3000-00000071'5a9e9fff r--    14a000     17000  /apex/com.android.vndk.v30/lib64/android.hardware.radio@1.4.so (BuildId: 20c4eb703a494d6e386dda1c102177)
+    00000071'5a9ea000-00000071'5a9eafff rw-    160000      1000  /apex/com.android.vndk.v30/lib64/android.hardware.radio@1.4.so (BuildId: 20c4eb703a494d6e386dda1c102177)
+    00000071'5aa0f000-00000071'5aa0ffff rw-         0      1000  [anon:bionic_alloc_small_objects]
+    00000071'5aae7000-00000071'5aae9fff r--         0      3000  /system/lib64/libnetd_client.so (BuildId: 547b0f55bc8cd9ccb7d05e712eed5f)
+    00000071'5aaea000-00000071'5aaedfff r-x      3000      4000  /system/lib64/libnetd_client.so (BuildId: 547b0f55bc8cd9ccb7d05e712eed5f)
+    00000071'5aaee000-00000071'5aaeefff r--      7000      1000  /system/lib64/libnetd_client.so (BuildId: 547b0f55bc8cd9ccb7d05e712eed5f)
+    00000071'5aaef000-00000071'5aaeffff rw-      7000      1000  /system/lib64/libnetd_client.so (BuildId: 547b0f55bc8cd9ccb7d05e712eed5f)
+    00000071'5ab3c000-00000071'5ab3cfff rw-         0      1000  [anon:bionic_alloc_small_objects]
+    00000071'5ab72000-00000071'5ab91fff r--         0     20000  /dev/__properties__/u:object_r:exported_default_prop:s0
+    00000071'5ab92000-00000071'5ab92fff ---         0      1000
+    00000071'5ab93000-00000071'5ab9afff rw-         0      8000  [anon:thread signal stack]
+    00000071'5ab9b000-00000071'5abbafff r--         0     20000  /dev/__properties__/u:object_r:vendor_default_prop:s0
+    00000071'5abbb000-00000071'5abdafff r--         0     20000  /dev/__properties__/u:object_r:heapprofd_prop:s0
+    00000071'5abdb000-00000071'5abfafff r--         0     20000  /dev/__properties__/u:object_r:exported2_default_prop:s0
+    00000071'5abfb000-00000071'5ac1afff r--         0     20000  /dev/__properties__/u:object_r:debug_prop:s0
+    00000071'5ac1b000-00000071'5ac3afff r--         0     20000  /dev/__properties__/properties_serial
+    00000071'5ac3b000-00000071'5ac45fff r--         0      b000  /dev/__properties__/property_info
+    00000071'5ac4a000-00000071'5ac69fff r--         0     20000  /dev/__properties__/u:object_r:logd_prop:s0
+    00000071'5ac6a000-00000071'5ac89fff r--         0     20000  /dev/__properties__/u:object_r:log_tag_prop:s0
+    00000071'5ac8a000-00000071'5aca9fff r--         0     20000  /dev/__properties__/u:object_r:vendor_socket_hook_prop:s0
+    00000071'5acaa000-00000071'5ad0dfff r--         0     64000  [anon:linker_alloc]
+    00000071'5ad0e000-00000071'5ad0efff rw-         0      1000  [anon:bionic_alloc_small_objects]
+    00000071'5ad10000-00000071'5ad10fff rw-         0      1000  [anon:bionic_alloc_small_objects]
+    00000071'5ad18000-00000071'5ad19fff rw-         0      2000  [anon:bionic_alloc_small_objects]
+    00000071'5ad1b000-00000071'5ad7efff r--         0     64000  [anon:linker_alloc]
+    00000071'5ad7f000-00000071'5ad9efff r--         0     20000  /dev/__properties__/u:object_r:vndk_prop:s0
+    00000071'5ada2000-00000071'5ada5fff rw-         0      4000  [anon:bionic_alloc_small_objects]
+    00000071'5ada7000-00000071'5ada7fff rw-         0      1000  [anon:abort message]
+    00000071'5ada8000-00000071'5ada8fff r--         0      1000  [anon:atexit handlers]
+    00000071'5ada9000-00000071'5ada9fff ---         0      1000
+    00000071'5adaa000-00000071'5adadfff rw-         0      4000  [anon:stack_and_tls:main]
+    00000071'5adae000-00000071'5adaefff ---         0      1000
+    00000071'5adaf000-00000071'5adb2fff rw-         0      4000  [anon:bionic_alloc_small_objects]
+    00000071'5adb3000-00000071'5adb5fff rw-         0      3000  [anon:bionic_alloc_lob]
+    00000071'5adb6000-00000071'5adb7fff rw-         0      2000  [anon:bionic_alloc_small_objects]
+    00000071'5adb8000-00000071'5adb8fff rw-         0      1000  [anon:bionic_alloc_lob]
+    00000071'5adb9000-00000071'5adbcfff rw-         0      4000  [anon:bionic_alloc_small_objects]
+    00000071'5adbd000-00000071'5ae20fff r--         0     64000  [anon:linker_alloc]
+    00000071'5ae21000-00000071'5ae21fff rw-         0      1000  [anon:bionic_alloc_small_objects]
+    00000071'5ae22000-00000071'5ae41fff r--         0     20000  /dev/__properties__/u:object_r:debug_prop:s0
+    00000071'5ae42000-00000071'5ae61fff r--         0     20000  /dev/__properties__/u:object_r:exported2_default_prop:s0
+    00000071'5ae62000-00000071'5ae62fff ---         0      1000
+    00000071'5ae63000-00000071'5ae6afff rw-         0      8000
+    00000071'5ae6b000-00000071'5ae6bfff ---         0      1000
+    00000071'5ae6c000-00000071'5ae8bfff r--         0     20000  /dev/__properties__/properties_serial
+    00000071'5ae8c000-00000071'5ae8dfff rw-         0      2000  [anon:System property context nodes]
+    00000071'5ae8e000-00000071'5ae98fff r--         0      b000  /dev/__properties__/property_info
+    00000071'5ae99000-00000071'5aefcfff r--         0     64000  [anon:linker_alloc]
+    00000071'5aefd000-00000071'5aefefff rw-         0      2000  [anon:bionic_alloc_small_objects]
+    00000071'5aeff000-00000071'5aefffff r--         0      1000  [anon:atexit handlers]
+    00000071'5af00000-00000071'5b0b1fff ---         0    1b2000
+    00000071'5b0b2000-00000071'5b0b3fff rw-         0      2000
+    00000071'5b0b4000-00000071'5befffff ---         0    e4c000
+    00000071'5bf00000-00000071'5bf00fff ---         0      1000
+    00000071'5bf01000-00000071'5bf08fff rw-         0      8000  [anon:thread signal stack]
+    00000071'5bf09000-00000071'5bf09fff rw-         0      1000  [anon:arc4random data]
+    00000071'5bf0a000-00000071'5bf0bfff rw-         0      2000  [anon:System property context nodes]
+    00000071'5bf0c000-00000071'5bf0cfff rw-         0      1000  [anon:arc4random data]
+    00000071'5bf0d000-00000071'5bf0dfff r--         0      1000  [vvar]
+    00000071'5bf0e000-00000071'5bf0efff r-x         0      1000  [vdso]
+    00000071'5bf0f000-00000071'5bf3ffff r--         0     31000  /apex/com.android.runtime/bin/linker64 (BuildId: 0a9763fb7d06a640116d2141243fab)
+    00000071'5bf40000-00000071'5bff3fff r-x     31000     b4000  /apex/com.android.runtime/bin/linker64 (BuildId: 0a9763fb7d06a640116d2141243fab)
+    00000071'5bff4000-00000071'5bffafff r--     e5000      7000  /apex/com.android.runtime/bin/linker64 (BuildId: 0a9763fb7d06a640116d2141243fab)
+    00000071'5bffb000-00000071'5bffcfff rw-     eb000      2000  /apex/com.android.runtime/bin/linker64 (BuildId: 0a9763fb7d06a640116d2141243fab)
+    00000071'5bffd000-00000071'5c000fff rw-         0      4000  [anon:.bss]
+    00000071'5c001000-00000071'5c001fff r--         0      1000  [anon:.bss]
+    00000071'5c002000-00000071'5c007fff rw-         0      6000  [anon:.bss]
+    0000007f'c48dc000-0000007f'c48fcfff rw-         0     21000  [stack]
+--- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
+pid: 512, tid: 520, name: libgoldfish-ril  >>> /vendor/bin/hw/libgoldfish-rild <<<
+uid: 1001
+    x0  0000000000000006  x1  0000006ec9842b40  x2  0000000000000000  x3  0000000000000000
+    x4  0000000000000000  x5  0000000000000000  x6  0000000000000000  x7  0000000000000030
+    x8  0000000000000048  x9  00000000000000bf  x10 0000000000000000  x11 000000715bf0d030
+    x12 0000000000017410  x13 00000002cf2dac17  x14 000f039f10000000  x15 0000000008000000
+    x16 0000007159cdd3d8  x17 0000007159b74f48  x18 0000006ec8bd6000  x19 0000007159cdf260
+    x20 0000000000000000  x21 0000000000000000  x22 0000006ec9842b40  x23 0000000000000006
+    x24 0000006ec9843000  x25 0000007159cdf308  x26 20c49ba5e353f7cf  x27 0000007159cdf000
+    x28 0000007159cdf388  x29 0000006ec9842ad0
+    lr  0000007159b74fe0  sp  0000006ec9842ab0  pc  0000007159bb6b94  pst 0000000060001000
+
+backtrace:
+      #00 pc 000000000009bb94  /apex/com.android.runtime/lib64/bionic/libc.so (__pselect6+4) (BuildId: ac8f7173c886715a2f2fec67246e21da)
+      #01 pc 0000000000059fdc  /apex/com.android.runtime/lib64/bionic/libc.so (select+148) (BuildId: ac8f7173c886715a2f2fec67246e21da)
+      #02 pc 000000000002232c  /vendor/lib64/libril-goldfish-fork.so (ril_event_loop()+348) (BuildId: b67571c5acb8659417e87280734e6e)
+      #03 pc 0000000000020ff8  /vendor/lib64/libril-goldfish-fork.so (android::eventLoop(void*)+248) (BuildId: b67571c5acb8659417e87280734e6e)
+      #04 pc 00000000000af8c8  /apex/com.android.runtime/lib64/bionic/libc.so (__pthread_start(void*)+64) (BuildId: ac8f7173c886715a2f2fec67246e21da)
+      #05 pc 000000000004fe08  /apex/com.android.runtime/lib64/bionic/libc.so (__start_thread+64) (BuildId: ac8f7173c886715a2f2fec67246e21da)
+
+open files:
+    fd 0: /dev/null (unowned)
+    fd 1: /dev/null (unowned)
+    fd 2: /dev/null (unowned)
+    fd 3: /dev/console (deleted) (unowned)
+    fd 4: socket:[16442] (unowned)
+    fd 5: pipe:[16443] (unowned)
+    fd 6: pipe:[16443] (unowned)

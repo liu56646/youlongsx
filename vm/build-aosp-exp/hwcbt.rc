@@ -1,0 +1,15 @@
+# VMHost 调试版：主动采样 HWC 回溯。
+# 用 root + stdio_to_kmsg，周期性跑 /system/bin/hwcbt.sh（内部用 debuggerd -b）。
+# 触发点必须是 on init（~22s），不能用 on boot（本 guest 里晚于 HWC 启动）。
+# seclabel 沿用 HWC 自己的域，满足 init 的 "no domain transition" 检查
+# （guest 是 permissive，域本身不限制行为）。
+service hwcbt /system/bin/sh /system/bin/hwcbt.sh
+    class late_start
+    user root
+    group root log system graphics
+    seclabel u:r:hal_graphics_composer_default:s0
+    stdio_to_kmsg
+    oneshot
+
+on init
+    start hwcbt

@@ -1,0 +1,46 @@
+QPID=11010
+=== debuggerd -b (native backtrace of all threads) ===
+
+
+----- pid 11010 at 2026-10-04 17:45:37.712169655+0800 -----
+Cmd line: /dev/vexp/qemu-system-aarch64 -M ranchu -cpu cortex-a57 -smp 1 -m 2048 -kernel /data/user/0/com.vm.app/files/images/p11_arm64/kernel -initrd /data/user/0/com.vm.app/files/images/p11_arm64/ramdisk.img -append console=ttyAMA0 androidboot.hardware=ranchu androidboot.selinux=permissive androidboot.veritymode=disabled -drive if=none,id=system,file=/data/user/0/com.vm.app/files/images/p11_arm64/system.img,format=raw,readonly=on -device virtio-blk-device,drive=system -display none -monitor none -serial file:/data/local/tmp/g15.log
+ABI: 'arm64'
+
+"qemu-system-aar" sysTid=11010
+    #00 pc 00000000004799e8  /dev/vexp/qemu-system-aarch64 (offset 0x4d0000)
+
+"qemu-system-aar" sysTid=11013
+    #00 pc 0000000000098e60  /apex/com.android.runtime/lib64/bionic/libc.so (syscall+32) (BuildId: 223a572c9f034c6a9337d8b3bedc75f3)
+    #01 pc 000000000044ec0c  /dev/vexp/qemu-system-aarch64 (offset 0x4d0000)
+
+"qemu-system-aar" sysTid=11014
+    #00 pc 00000000000d8f8c  /apex/com.android.runtime/lib64/bionic/libc.so (__rt_sigtimedwait+12) (BuildId: 223a572c9f034c6a9337d8b3bedc75f3)
+    #01 pc 00000000000889bc  /apex/com.android.runtime/lib64/bionic/libc.so (sigwait+108) (BuildId: 223a572c9f034c6a9337d8b3bedc75f3)
+    #02 pc 000000000044cab0  /dev/vexp/qemu-system-aarch64 (offset 0x4d0000)
+
+"qemu-system-aar" sysTid=11015
+    #00 pc 00000000000d9e08  /apex/com.android.runtime/lib64/bionic/libc.so (__ppoll+8) (BuildId: 223a572c9f034c6a9337d8b3bedc75f3)
+    #01 pc 00000000000807e4  /apex/com.android.runtime/lib64/bionic/libc.so (ppoll64+228) (BuildId: 223a572c9f034c6a9337d8b3bedc75f3)
+    #02 pc 000000000044c27c  /dev/vexp/qemu-system-aarch64 (offset 0x4d0000)
+
+"qemu-system-aar" sysTid=11016
+    #00 pc 0000000000098e60  /apex/com.android.runtime/lib64/bionic/libc.so (syscall+32) (BuildId: 223a572c9f034c6a9337d8b3bedc75f3)
+    #01 pc 000000000007412c  /apex/com.android.runtime/lib64/bionic/libc.so (__futex_wait_ex_owner(void volatile*, bool, int, bool, timespec const*, int)+224) (BuildId: 223a572c9f034c6a9337d8b3bedc75f3)
+    #02 pc 0000000000084710  /apex/com.android.runtime/lib64/bionic/libc.so (NonPI::MutexLockWithTimeout(pthread_mutex_internal_t*, bool, timespec const*)+408) (BuildId: 223a572c9f034c6a9337d8b3bedc75f3)
+    #03 pc 000000000044e07c  /dev/vexp/qemu-system-aarch64 (offset 0x4d0000)
+
+----- end 11010 -----
+=== 主线程 wchan / syscall ===
+cat: /proc/11010/wchan: No such file or directory
+
+cat: /proc/11010/syscall: No such file or directory
+
+=== 主线程内核栈 ===
+cat: /proc/11010/stack: No such file or directory
+=== 各线程 wchan ===
+tid=* wchan= syscall=
+=== guest tail ===
+[    7.512253] hub 3-0:1.0: USB hub found
+[    7.512637] hub 3-0:1.0: 8 ports detected
+[    7.774075] virtio_blk virtio0: [vda] 6313984 512-byte logical blocks (3.23 GB/3.01 GiB)
+DONE

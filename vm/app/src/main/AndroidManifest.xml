@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <application
+        android:allowBackup="false"
+        android:icon="@drawable/ic_launcher"
+        android:label="@string/app_name"
+        android:largeHeap="true"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.VmHost">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+            实例运行时：每个实例一个 NativeActivity + 独立进程。
+            meta-data android.app.lib_name 指向 libvmengine.so（不带 lib 前缀与 .so 后缀）。
+            扩展实例数量 = 复制下方一组 <activity> 并同步 VmConstants.MAX_INSTANCES。
+        -->
+        <activity
+            android:name=".instance.VmNativeActivity1"
+            android:autoRemoveFromRecents="true"
+            android:configChanges="density|keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize"
+            android:exported="false"
+            android:label="VM 1"
+            android:launchMode="singleInstance"
+            android:process=":vm1"
+            android:taskAffinity="com.vm.app.vm1"
+            android:theme="@style/Theme.VmHost.Fullscreen">
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="vmengine" />
+        </activity>
+
+        <activity
+            android:name=".instance.VmNativeActivity2"
+            android:autoRemoveFromRecents="true"
+            android:configChanges="density|keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize"
+            android:exported="false"
+            android:label="VM 2"
+            android:launchMode="singleInstance"
+            android:process=":vm2"
+            android:taskAffinity="com.vm.app.vm2"
+            android:theme="@style/Theme.VmHost.Fullscreen">
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="vmengine" />
+        </activity>
+
+        <activity
+            android:name=".instance.VmNativeActivity3"
+            android:autoRemoveFromRecents="true"
+            android:configChanges="density|keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize"
+            android:exported="false"
+            android:label="VM 3"
+            android:launchMode="singleInstance"
+            android:process=":vm3"
+            android:taskAffinity="com.vm.app.vm3"
+            android:theme="@style/Theme.VmHost.Fullscreen">
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="vmengine" />
+        </activity>
+
+        <activity
+            android:name=".instance.VmNativeActivity4"
+            android:autoRemoveFromRecents="true"
+            android:configChanges="density|keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize"
+            android:exported="false"
+            android:label="VM 4"
+            android:launchMode="singleInstance"
+            android:process=":vm4"
+            android:taskAffinity="com.vm.app.vm4"
+            android:theme="@style/Theme.VmHost.Fullscreen">
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="vmengine" />
+        </activity>
+
+        <!-- 访客网络：宿主侧 tun，供引擎的 slirp 桥接 -->
+        <service
+            android:name=".net.VmNetworkService"
+            android:exported="false"
+            android:permission="android.permission.BIND_VPN_SERVICE">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+        </service>
+
+    </application>
+
+</manifest>

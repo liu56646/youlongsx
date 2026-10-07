@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  仅 debug 构建生效。
+
+  开发时常用局域网 HTTP 服务器（python -m http.server）当镜像源，
+  而 Android 从 targetSdk 28 起默认禁止明文 HTTP。
+  这里只给 debug 放行，release 构建不包含本文件，仍然只允许 https。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application android:usesCleartextTraffic="true" />
+
+</manifest>

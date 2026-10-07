@@ -1,0 +1,476 @@
+5ade5f6000-5ade5ff000 r--p 00000000 fb:10 90                             /vendor/bin/hw/android.hardware.graphics.composer@2.3-service
+5ade5ff000-5ade610000 r-xp 00009000 fb:10 90                             /vendor/bin/hw/android.hardware.graphics.composer@2.3-service
+5ade610000-5ade613000 r--p 0001a000 fb:10 90                             /vendor/bin/hw/android.hardware.graphics.composer@2.3-service
+6f682ba000-6f6899e000 ---p 00000000 00:00 0 
+6f6899e000-6f689a0000 rw-p 00000000 00:00 0 
+6f689a0000-6f692ba000 ---p 00000000 00:00 0 
+6f692ba000-6f692bb000 ---p 00000000 00:00 0 
+6f692bb000-6f696bc000 rw-p 00000000 00:00 0                              [anon:scudo:secondary]
+6f696bc000-6f696bd000 ---p 00000000 00:00 0 
+6f696bd000-6f699b4000 ---p 00000000 00:00 0 
+6f699b4000-6f699b6000 rw-p 00000000 00:00 0 
+6f699b6000-6f6a6bd000 ---p 00000000 00:00 0 
+6f6a6bd000-6f6a6be000 ---p 00000000 00:00 0 
+6f6a6be000-6f6ab3f000 rw-p 00000000 00:00 0                              [anon:scudo:secondary]
+6f6ab3f000-6f6ab40000 ---p 00000000 00:00 0 
+6f6ad34000-6f6ad38000 r--p 00000000 fb:10 430                            /vendor/lib64/hw/android.hardware.graphics.mapper@3.0-impl-ranchu.so
+6f6ad38000-6f6ad3b000 r-xp 00004000 fb:10 430                            /vendor/lib64/hw/android.hardware.graphics.mapper@3.0-impl-ranchu.so
+6f6ad3b000-6f6ad3c000 r--p 00007000 fb:10 430                            /vendor/lib64/hw/android.hardware.graphics.mapper@3.0-impl-ranchu.so
+6f6ad47000-6f6ad48000 ---p 00000000 00:00 0 
+6f6ad48000-6f6ae44000 rw-p 00000000 00:00 0                              [anon:stack_and_tls:345]
+6f6ae44000-6f6ae46000 ---p 00000000 00:00 0 
+6f6ae46000-6f6af42000 rw-p 00000000 00:00 0                              [anon:stack_and_tls:343]
+6f6af42000-6f6af43000 ---p 00000000 00:00 0 
+6f6af43000-6f6af4b000 r--p 00000000 fb:00 1665                           /system/lib64/libbinder_ndk.so
+6f6af4b000-6f6af53000 r-xp 00008000 fb:00 1665                           /system/lib64/libbinder_ndk.so
+6f6af53000-6f6af54000 r--p 00010000 fb:00 1665                           /system/lib64/libbinder_ndk.so
+6f6af54000-6f6af55000 rw-p 00010000 fb:00 1665                           /system/lib64/libbinder_ndk.so
+6f6af90000-6f6af91000 r--p 00000000 fb:00 1836                           /system/lib64/libnativeloader_lazy.so
+6f6af91000-6f6af92000 r-xp 00001000 fb:00 1836                           /system/lib64/libnativeloader_lazy.so
+6f6af92000-6f6af93000 r--p 00002000 fb:00 1836                           /system/lib64/libnativeloader_lazy.so
+6f6af93000-6f6af94000 rw-p 00002000 fb:00 1836                           /system/lib64/libnativeloader_lazy.so
+6f6afd0000-6f6afd1000 r--p 00000000 07:06 79                             /apex/com.android.vndk.v30/lib64/android.hardware.common-V1-ndk_platform.so
+6f6afd1000-6f6afd2000 r-xp 00001000 07:06 79                             /apex/com.android.vndk.v30/lib64/android.hardware.common-V1-ndk_platform.so
+6f6afd2000-6f6afd3000 r--p 00002000 07:06 79                             /apex/com.android.vndk.v30/lib64/android.hardware.common-V1-ndk_platform.so
+6f6afd3000-6f6afd4000 rw-p 00002000 07:06 79                             /apex/com.android.vndk.v30/lib64/android.hardware.common-V1-ndk_platform.so
+6f6b015000-6f6b016000 r--p 00000000 fb:00 1521                           /system/lib64/android.hardware.graphics.common@1.2.so
+6f6b016000-6f6b017000 r-xp 00001000 fb:00 1521                           /system/lib64/android.hardware.graphics.common@1.2.so
+6f6b017000-6f6b018000 r--p 00002000 fb:00 1521                           /system/lib64/android.hardware.graphics.common@1.2.so
+6f6b05c000-6f6b063000 r--p 00000000 fb:00 1750                           /system/lib64/libgraphicsenv.so
+6f6b063000-6f6b067000 r-xp 00007000 fb:00 1750                           /system/lib64/libgraphicsenv.so
+6f6b067000-6f6b069000 r--p 0000b000 fb:00 1750                           /system/lib64/libgraphicsenv.so
+6f6b069000-6f6b06a000 rw-p 0000c000 fb:00 1750                           /system/lib64/libgraphicsenv.so
+6f6b0a6000-6f6b0b2000 r--p 00000000 fb:00 1527                           /system/lib64/android.hardware.graphics.mapper@2.1.so
+6f6b0b2000-6f6b0bd000 r-xp 0000c000 fb:00 1527                           /system/lib64/android.hardware.graphics.mapper@2.1.so
+6f6b0bd000-6f6b0bf000 r--p 00017000 fb:00 1527                           /system/lib64/android.hardware.graphics.mapper@2.1.so
+6f6b0bf000-6f6b0c0000 rw-p 00018000 fb:00 1527                           /system/lib64/android.hardware.graphics.mapper@2.1.so
+6f6b0cc000-6f6b0cd000 r--p 00000000 fb:00 1633                           /system/lib64/libandroid_runtime_lazy.so
+6f6b0cd000-6f6b0ce000 r-xp 00001000 fb:00 1633                           /system/lib64/libandroid_runtime_lazy.so
+6f6b0ce000-6f6b0cf000 r--p 00002000 fb:00 1633                           /system/lib64/libandroid_runtime_lazy.so
+6f6b0cf000-6f6b0d0000 rw-p 00002000 fb:00 1633                           /system/lib64/libandroid_runtime_lazy.so
+6f6b105000-6f6b118000 r--p 00000000 fb:00 1608                           /system/lib64/libEGL.so
+6f6b118000-6f6b12f000 r-xp 00013000 fb:00 1608                           /system/lib64/libEGL.so
+6f6b12f000-6f6b134000 r--p 0002a000 fb:00 1608                           /system/lib64/libEGL.so
+6f6b134000-6f6b135000 rw-p 0002e000 fb:00 1608                           /system/lib64/libEGL.so
+6f6b135000-6f6b13d000 rw-p 00000000 00:00 0                              [anon:.bss]
+6f6b151000-6f6b152000 r--p 00000000 fb:00 1520                           /system/lib64/android.hardware.graphics.common@1.1.so
+6f6b152000-6f6b153000 r-xp 00001000 fb:00 1520                           /system/lib64/android.hardware.graphics.common@1.1.so
+6f6b153000-6f6b154000 r--p 00002000 fb:00 1520                           /system/lib64/android.hardware.graphics.common@1.1.so
+6f6b182000-6f6b18e000 r--p 00000000 fb:00 1528                           /system/lib64/android.hardware.graphics.mapper@3.0.so
+6f6b18e000-6f6b19b000 r-xp 0000c000 fb:00 1528                           /system/lib64/android.hardware.graphics.mapper@3.0.so
+6f6b19b000-6f6b19d000 r--p 00019000 fb:00 1528                           /system/lib64/android.hardware.graphics.mapper@3.0.so
+6f6b19d000-6f6b19e000 rw-p 0001a000 fb:00 1528                           /system/lib64/android.hardware.graphics.mapper@3.0.so
+6f6b1e9000-6f6b1f3000 r--p 00000000 fb:00 1515                           /system/lib64/android.hardware.graphics.allocator@4.0.so
+6f6b1f3000-6f6b1fb000 r-xp 0000a000 fb:00 1515                           /system/lib64/android.hardware.graphics.allocator@4.0.so
+6f6b1fb000-6f6b1fd000 r--p 00012000 fb:00 1515                           /system/lib64/android.hardware.graphics.allocator@4.0.so
+6f6b1fd000-6f6b1fe000 rw-p 00013000 fb:00 1515                           /system/lib64/android.hardware.graphics.allocator@4.0.so
+6f6b207000-6f6b24d000 r--p 00000000 fb:00 1761                           /system/lib64/libhidlbase.so
+6f6b24d000-6f6b2b3000 r-xp 00046000 fb:00 1761                           /system/lib64/libhidlbase.so
+6f6b2b3000-6f6b2be000 r--p 000ac000 fb:00 1761                           /system/lib64/libhidlbase.so
+6f6b2be000-6f6b2c0000 rw-p 000b6000 fb:00 1761                           /system/lib64/libhidlbase.so
+6f6b2de000-6f6b38a000 r--p 00000000 fb:10 518                            /vendor/lib64/libvulkan_enc.so
+6f6b38a000-6f6b438000 r-xp 000ac000 fb:10 518                            /vendor/lib64/libvulkan_enc.so
+6f6b438000-6f6b43d000 r--p 0015a000 fb:10 518                            /vendor/lib64/libvulkan_enc.so
+6f6b43d000-6f6b43e000 rw-p 0015e000 fb:10 518                            /vendor/lib64/libvulkan_enc.so
+6f6b445000-6f6b44e000 r--p 00000000 fb:10 448                            /vendor/lib64/libOpenglSystemCommon.so
+6f6b44e000-6f6b458000 r-xp 00009000 fb:10 448                            /vendor/lib64/libOpenglSystemCommon.so
+6f6b458000-6f6b459000 r--p 00013000 fb:10 448                            /vendor/lib64/libOpenglSystemCommon.so
+6f6b459000-6f6b45a000 rw-p 00013000 fb:10 448                            /vendor/lib64/libOpenglSystemCommon.so
+6f6b488000-6f6b48c000 r--p 00000000 fb:10 450                            /vendor/lib64/lib_renderControl_enc.so
+6f6b48c000-6f6b493000 r-xp 00004000 fb:10 450                            /vendor/lib64/lib_renderControl_enc.so
+6f6b493000-6f6b494000 r--p 0000b000 fb:10 450                            /vendor/lib64/lib_renderControl_enc.so
+6f6b494000-6f6b495000 rw-p 0000b000 fb:10 450                            /vendor/lib64/lib_renderControl_enc.so
+6f6b4d9000-6f6b4fd000 r--p 00000000 fb:10 446                            /vendor/lib64/libGLESv2_enc.so
+6f6b4fd000-6f6b53b000 r-xp 00024000 fb:10 446                            /vendor/lib64/libGLESv2_enc.so
+6f6b53b000-6f6b53d000 r--p 00062000 fb:10 446                            /vendor/lib64/libGLESv2_enc.so
+6f6b53d000-6f6b53e000 rw-p 00063000 fb:10 446                            /vendor/lib64/libGLESv2_enc.so
+6f6b55d000-6f6b55e000 r--p 00000000 fb:00 1519                           /system/lib64/android.hardware.graphics.common@1.0.so
+6f6b55e000-6f6b55f000 r-xp 00001000 fb:00 1519                           /system/lib64/android.hardware.graphics.common@1.0.so
+6f6b55f000-6f6b560000 r--p 00002000 fb:00 1519                           /system/lib64/android.hardware.graphics.common@1.0.so
+6f6b58a000-6f6b599000 r--p 00000000 fb:00 1529                           /system/lib64/android.hardware.graphics.mapper@4.0.so
+6f6b599000-6f6b5ab000 r-xp 0000f000 fb:00 1529                           /system/lib64/android.hardware.graphics.mapper@4.0.so
+6f6b5ab000-6f6b5ae000 r--p 00021000 fb:00 1529                           /system/lib64/android.hardware.graphics.mapper@4.0.so
+6f6b5ae000-6f6b5af000 rw-p 00023000 fb:00 1529                           /system/lib64/android.hardware.graphics.mapper@4.0.so
+6f6b5c9000-6f6b5d3000 r--p 00000000 07:06 102                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.allocator@2.0.so
+6f6b5d3000-6f6b5dc000 r-xp 0000a000 07:06 102                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.allocator@2.0.so
+6f6b5dc000-6f6b5de000 r--p 00013000 07:06 102                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.allocator@2.0.so
+6f6b5de000-6f6b5df000 rw-p 00014000 07:06 102                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.allocator@2.0.so
+6f6b60a000-6f6b60c000 r--p 00000000 07:06 107                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.common-V1-ndk_platform.so
+6f6b60c000-6f6b60e000 r-xp 00002000 07:06 107                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.common-V1-ndk_platform.so
+6f6b60e000-6f6b60f000 r--p 00004000 07:06 107                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.common-V1-ndk_platform.so
+6f6b60f000-6f6b610000 rw-p 00004000 07:06 107                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.common-V1-ndk_platform.so
+6f6b64c000-6f6b656000 r--p 00000000 07:06 103                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.allocator@3.0.so
+6f6b656000-6f6b65f000 r-xp 0000a000 07:06 103                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.allocator@3.0.so
+6f6b65f000-6f6b661000 r--p 00013000 07:06 103                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.allocator@3.0.so
+6f6b661000-6f6b662000 rw-p 00014000 07:06 103                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.allocator@3.0.so
+6f6b6b0000-6f6b6b2000 r--p 00000000 fb:00 1710                           /system/lib64/libdexfile_support.so
+6f6b6b2000-6f6b6b3000 r-xp 00002000 fb:00 1710                           /system/lib64/libdexfile_support.so
+6f6b6b3000-6f6b6b4000 r--p 00003000 fb:00 1710                           /system/lib64/libdexfile_support.so
+6f6b6b4000-6f6b6b5000 rw-p 00003000 fb:00 1710                           /system/lib64/libdexfile_support.so
+6f6b6c0000-6f6b6cf000 r--p 00000000 fb:00 1922                           /system/lib64/libutils.so
+6f6b6cf000-6f6b6dc000 r-xp 0000f000 fb:00 1922                           /system/lib64/libutils.so
+6f6b6dc000-6f6b6dd000 r--p 0001c000 fb:00 1922                           /system/lib64/libutils.so
+6f6b6dd000-6f6b6de000 rw-p 0001c000 fb:00 1922                           /system/lib64/libutils.so
+6f6b70d000-6f6b715000 r--p 00000000 fb:00 1749                           /system/lib64/libgralloctypes.so
+6f6b715000-6f6b71e000 r-xp 00008000 fb:00 1749                           /system/lib64/libgralloctypes.so
+6f6b71e000-6f6b71f000 r--p 00011000 fb:00 1749                           /system/lib64/libgralloctypes.so
+6f6b71f000-6f6b720000 rw-p 00011000 fb:00 1749                           /system/lib64/libgralloctypes.so
+6f6b74c000-6f6b757000 r--p 00000000 fb:10 447                            /vendor/lib64/libOpenglCodecCommon.so
+6f6b757000-6f6b767000 r-xp 0000b000 fb:10 447                            /vendor/lib64/libOpenglCodecCommon.so
+6f6b767000-6f6b768000 r--p 0001b000 fb:10 447                            /vendor/lib64/libOpenglCodecCommon.so
+6f6b798000-6f6b79a000 r--p 00000000 fb:00 1834                           /system/lib64/libnativebridge_lazy.so
+6f6b79a000-6f6b79b000 r-xp 00002000 fb:00 1834                           /system/lib64/libnativebridge_lazy.so
+6f6b79b000-6f6b79c000 r--p 00003000 fb:00 1834                           /system/lib64/libnativebridge_lazy.so
+6f6b79c000-6f6b79d000 rw-p 00003000 fb:00 1834                           /system/lib64/libnativebridge_lazy.so
+6f6b7c7000-6f6b7d4000 r--p 00000000 fb:00 1496                           /system/lib64/android.hardware.configstore@1.1.so
+6f6b7d4000-6f6b7e0000 r-xp 0000d000 fb:00 1496                           /system/lib64/android.hardware.configstore@1.1.so
+6f6b7e0000-6f6b7e3000 r--p 00019000 fb:00 1496                           /system/lib64/android.hardware.configstore@1.1.so
+6f6b7e3000-6f6b7e4000 rw-p 0001b000 fb:00 1496                           /system/lib64/android.hardware.configstore@1.1.so
+6f6b811000-6f6b834000 r--p 00000000 fb:00 1919                           /system/lib64/libui.so
+6f6b834000-6f6b853000 r-xp 00023000 fb:00 1919                           /system/lib64/libui.so
+6f6b853000-6f6b856000 r--p 00042000 fb:00 1919                           /system/lib64/libui.so
+6f6b856000-6f6b857000 rw-p 00044000 fb:00 1919                           /system/lib64/libui.so
+6f6b857000-6f6b858000 rw-p 00000000 00:00 0                              [anon:.bss]
+6f6b8a4000-6f6b8b4000 r--p 00000000 fb:00 1623                           /system/lib64/libSurfaceFlingerProp.so
+6f6b8b4000-6f6b8be000 r-xp 00010000 fb:00 1623                           /system/lib64/libSurfaceFlingerProp.so
+6f6b8be000-6f6b8bf000 r--p 0001a000 fb:00 1623                           /system/lib64/libSurfaceFlingerProp.so
+6f6b8bf000-6f6b8c0000 rw-p 0001a000 fb:00 1623                           /system/lib64/libSurfaceFlingerProp.so
+6f6b8c0000-6f6b8ca000 r--p 00000000 fb:00 1660                           /system/lib64/libbacktrace.so
+6f6b8ca000-6f6b8e3000 r-xp 0000a000 fb:00 1660                           /system/lib64/libbacktrace.so
+6f6b8e3000-6f6b8e6000 r--p 00023000 fb:00 1660                           /system/lib64/libbacktrace.so
+6f6b8e6000-6f6b8e7000 rw-p 00025000 fb:00 1660                           /system/lib64/libbacktrace.so
+6f6b919000-6f6b923000 r--p 00000000 07:06 104                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.allocator@4.0.so
+6f6b923000-6f6b92b000 r-xp 0000a000 07:06 104                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.allocator@4.0.so
+6f6b92b000-6f6b92d000 r--p 00012000 07:06 104                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.allocator@4.0.so
+6f6b92d000-6f6b92e000 rw-p 00013000 07:06 104                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.allocator@4.0.so
+6f6b950000-6f6b951000 r--p 00000000 fb:00 1493                           /system/lib64/android.hardware.common-V1-ndk_platform.so
+6f6b951000-6f6b952000 r-xp 00001000 fb:00 1493                           /system/lib64/android.hardware.common-V1-ndk_platform.so
+6f6b952000-6f6b953000 r--p 00002000 fb:00 1493                           /system/lib64/android.hardware.common-V1-ndk_platform.so
+6f6b953000-6f6b954000 rw-p 00002000 fb:00 1493                           /system/lib64/android.hardware.common-V1-ndk_platform.so
+6f6b99e000-6f6b9c1000 r--p 00000000 07:06 296                            /apex/com.android.vndk.v30/lib64/libui.so
+6f6b9c1000-6f6b9e0000 r-xp 00023000 07:06 296                            /apex/com.android.vndk.v30/lib64/libui.so
+6f6b9e0000-6f6b9e3000 r--p 00042000 07:06 296                            /apex/com.android.vndk.v30/lib64/libui.so
+6f6b9e3000-6f6b9e4000 rw-p 00044000 07:06 296                            /apex/com.android.vndk.v30/lib64/libui.so
+6f6b9e4000-6f6b9e5000 rw-p 00000000 00:00 0                              [anon:.bss]
+6f6ba2e000-6f6ba32000 r--p 00000000 fb:00 1837                           /system/lib64/libnativewindow.so
+6f6ba32000-6f6ba34000 r-xp 00004000 fb:00 1837                           /system/lib64/libnativewindow.so
+6f6ba34000-6f6ba35000 r--p 00006000 fb:00 1837                           /system/lib64/libnativewindow.so
+6f6ba53000-6f6ba5b000 r--p 00000000 07:06 256                            /apex/com.android.vndk.v30/lib64/libgralloctypes.so
+6f6ba5b000-6f6ba64000 r-xp 00008000 07:06 256                            /apex/com.android.vndk.v30/lib64/libgralloctypes.so
+6f6ba64000-6f6ba65000 r--p 00011000 07:06 256                            /apex/com.android.vndk.v30/lib64/libgralloctypes.so
+6f6ba65000-6f6ba66000 rw-p 00011000 07:06 256                            /apex/com.android.vndk.v30/lib64/libgralloctypes.so
+6f6baa3000-6f6baad000 r--p 00000000 fb:00 1513                           /system/lib64/android.hardware.graphics.allocator@2.0.so
+6f6baad000-6f6bab6000 r-xp 0000a000 fb:00 1513                           /system/lib64/android.hardware.graphics.allocator@2.0.so
+6f6bab6000-6f6bab8000 r--p 00013000 fb:00 1513                           /system/lib64/android.hardware.graphics.allocator@2.0.so
+6f6bab8000-6f6bab9000 rw-p 00014000 fb:00 1513                           /system/lib64/android.hardware.graphics.allocator@2.0.so
+6f6bac2000-6f6bac3000 r--p 00000000 fb:00 1494                           /system/lib64/android.hardware.configstore-utils.so
+6f6bac3000-6f6bac4000 r-xp 00001000 fb:00 1494                           /system/lib64/android.hardware.configstore-utils.so
+6f6bac4000-6f6bac5000 r--p 00002000 fb:00 1494                           /system/lib64/android.hardware.configstore-utils.so
+6f6bb16000-6f6bb5f000 r--p 00000000 fb:00 1664                           /system/lib64/libbinder.so
+6f6bb5f000-6f6bba3000 r-xp 00049000 fb:00 1664                           /system/lib64/libbinder.so
+6f6bba3000-6f6bbb6000 r--p 0008d000 fb:00 1664                           /system/lib64/libbinder.so
+6f6bbb6000-6f6bbb7000 rw-p 0009f000 fb:00 1664                           /system/lib64/libbinder.so
+6f6bbb7000-6f6bbb8000 rw-p 00000000 00:00 0                              [anon:.bss]
+6f6bbc7000-6f6bbd1000 r--p 00000000 fb:00 1514                           /system/lib64/android.hardware.graphics.allocator@3.0.so
+6f6bbd1000-6f6bbda000 r-xp 0000a000 fb:00 1514                           /system/lib64/android.hardware.graphics.allocator@3.0.so
+6f6bbda000-6f6bbdc000 r--p 00013000 fb:00 1514                           /system/lib64/android.hardware.graphics.allocator@3.0.so
+6f6bbdc000-6f6bbdd000 rw-p 00014000 fb:00 1514                           /system/lib64/android.hardware.graphics.allocator@3.0.so
+6f6bc07000-6f6bc15000 r--p 00000000 fb:00 1495                           /system/lib64/android.hardware.configstore@1.0.so
+6f6bc15000-6f6bc27000 r-xp 0000e000 fb:00 1495                           /system/lib64/android.hardware.configstore@1.0.so
+6f6bc27000-6f6bc2a000 r--p 00020000 fb:00 1495                           /system/lib64/android.hardware.configstore@1.0.so
+6f6bc2a000-6f6bc2b000 rw-p 00022000 fb:00 1495                           /system/lib64/android.hardware.configstore@1.0.so
+6f6bc6b000-6f6bc6d000 r--p 00000000 fb:00 1518                           /system/lib64/android.hardware.graphics.common-V1-ndk_platform.so
+6f6bc6d000-6f6bc6f000 r-xp 00002000 fb:00 1518                           /system/lib64/android.hardware.graphics.common-V1-ndk_platform.so
+6f6bc6f000-6f6bc70000 r--p 00004000 fb:00 1518                           /system/lib64/android.hardware.graphics.common-V1-ndk_platform.so
+6f6bc70000-6f6bc71000 rw-p 00004000 fb:00 1518                           /system/lib64/android.hardware.graphics.common-V1-ndk_platform.so
+6f6bc81000-6f6bc98000 r--p 00000000 fb:00 1861                           /system/lib64/libprocessgroup.so
+6f6bc98000-6f6bcbd000 r-xp 00017000 fb:00 1861                           /system/lib64/libprocessgroup.so
+6f6bcbd000-6f6bcbf000 r--p 0003c000 fb:00 1861                           /system/lib64/libprocessgroup.so
+6f6bcbf000-6f6bcc0000 rw-p 0003d000 fb:00 1861                           /system/lib64/libprocessgroup.so
+6f6bcc0000-6f6bce7000 r--p 00000000 fb:00 1920                           /system/lib64/libunwindstack.so
+6f6bce7000-6f6bd29000 r-xp 00027000 fb:00 1920                           /system/lib64/libunwindstack.so
+6f6bd29000-6f6bd2e000 r--p 00069000 fb:00 1920                           /system/lib64/libunwindstack.so
+6f6bd2e000-6f6bd2f000 rw-p 0006d000 fb:00 1920                           /system/lib64/libunwindstack.so
+6f6bd40000-6f6bd48000 r--p 00000000 fb:00 1805                           /system/lib64/liblzma.so
+6f6bd48000-6f6bd64000 r-xp 00008000 fb:00 1805                           /system/lib64/liblzma.so
+6f6bd64000-6f6bd65000 r--p 00024000 fb:00 1805                           /system/lib64/liblzma.so
+6f6bd65000-6f6bd66000 rw-p 00024000 fb:00 1805                           /system/lib64/liblzma.so
+6f6bd66000-6f6bd6c000 rw-p 00000000 00:00 0                              [anon:.bss]
+6f6bd82000-6f6bd8b000 r--p 00000000 fb:10 451                            /vendor/lib64/libandroidemu.so
+6f6bd8b000-6f6bd93000 r-xp 00009000 fb:10 451                            /vendor/lib64/libandroidemu.so
+6f6bd93000-6f6bd94000 r--p 00011000 fb:10 451                            /vendor/lib64/libandroidemu.so
+6f6bd94000-6f6bd95000 rw-p 00011000 fb:10 451                            /vendor/lib64/libandroidemu.so
+6f6bdd7000-6f6bde2000 r--p 00000000 fb:00 1526                           /system/lib64/android.hardware.graphics.mapper@2.0.so
+6f6bde2000-6f6bded000 r-xp 0000b000 fb:00 1526                           /system/lib64/android.hardware.graphics.mapper@2.0.so
+6f6bded000-6f6bdef000 r--p 00016000 fb:00 1526                           /system/lib64/android.hardware.graphics.mapper@2.0.so
+6f6bdef000-6f6bdf0000 rw-p 00017000 fb:00 1526                           /system/lib64/android.hardware.graphics.mapper@2.0.so
+6f6be03000-6f6be14000 r--p 00000000 fb:10 445                            /vendor/lib64/libGLESv1_enc.so
+6f6be14000-6f6be31000 r-xp 00011000 fb:10 445                            /vendor/lib64/libGLESv1_enc.so
+6f6be31000-6f6be32000 r--p 0002e000 fb:10 445                            /vendor/lib64/libGLESv1_enc.so
+6f6be32000-6f6be33000 rw-p 0002e000 fb:10 445                            /vendor/lib64/libGLESv1_enc.so
+6f6be63000-6f6be6a000 r--p 00000000 fb:00 1706                           /system/lib64/libcutils.so
+6f6be6a000-6f6be72000 r-xp 00007000 fb:00 1706                           /system/lib64/libcutils.so
+6f6be72000-6f6be74000 r--p 0000f000 fb:00 1706                           /system/lib64/libcutils.so
+6f6be74000-6f6be75000 rw-p 00010000 fb:00 1706                           /system/lib64/libcutils.so
+6f6be95000-6f6bea1000 r--p 00000000 07:06 116                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.mapper@2.1.so
+6f6bea1000-6f6beac000 r-xp 0000c000 07:06 116                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.mapper@2.1.so
+6f6beac000-6f6beae000 r--p 00017000 07:06 116                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.mapper@2.1.so
+6f6beae000-6f6beaf000 rw-p 00018000 07:06 116                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.mapper@2.1.so
+6f6bedd000-6f6bee7000 r--p 00000000 fb:10 440                            /vendor/lib64/hw/hwcomposer.ranchu.so
+6f6bee7000-6f6bef2000 r-xp 0000a000 fb:10 440                            /vendor/lib64/hw/hwcomposer.ranchu.so
+6f6bef2000-6f6bef3000 r--p 00015000 fb:10 440                            /vendor/lib64/hw/hwcomposer.ranchu.so
+6f6bef3000-6f6bef4000 rw-p 00015000 fb:10 440                            /vendor/lib64/hw/hwcomposer.ranchu.so
+6f6bf14000-6f6bf1b000 r--p 00000000 fb:10 456                            /vendor/lib64/libdrm.so
+6f6bf1b000-6f6bf27000 r-xp 00007000 fb:10 456                            /vendor/lib64/libdrm.so
+6f6bf27000-6f6bf28000 r--p 00013000 fb:10 456                            /vendor/lib64/libdrm.so
+6f6bf28000-6f6bf29000 rw-p 00013000 fb:10 456                            /vendor/lib64/libdrm.so
+6f6bf62000-6f6c060000 r--p 00000000 00:1e 5                              /dev/binderfs/hwbinder
+6f6c060000-6f6cef8000 ---p 00000000 00:00 0 
+6f6cef8000-6f6cefa000 rw-p 00000000 00:00 0 
+6f6cefa000-6f6d060000 ---p 00000000 00:00 0 
+6f6d060000-6f6d061000 ---p 00000000 00:00 0 
+6f6d061000-6f6d15d000 rw-p 00000000 00:00 0                              [anon:stack_and_tls:342]
+6f6d15d000-6f6d15e000 ---p 00000000 00:00 0 
+6f6d15e000-6f6d25c000 r--p 00000000 00:1e 6                              /dev/binderfs/vndbinder
+6f6d25c000-6f6d532000 ---p 00000000 00:00 0                              [anon:cfi shadow]
+6f6d532000-6f6d533000 r--p 00000000 00:00 0                              [anon:cfi shadow]
+6f6d533000-6f6d5d7000 ---p 00000000 00:00 0                              [anon:cfi shadow]
+6f6d5d7000-6f6d5d8000 r--p 00000000 00:00 0                              [anon:cfi shadow]
+6f6d5d8000-6f6d5db000 ---p 00000000 00:00 0                              [anon:cfi shadow]
+6f6d5db000-6f6d5dc000 r--p 00000000 00:00 0                              [anon:cfi shadow]
+6f6d5dc000-6f6d5eb000 ---p 00000000 00:00 0                              [anon:cfi shadow]
+6f6d5eb000-6f6d5ec000 r--p 00000000 00:00 0                              [anon:cfi shadow]
+6f6d5ec000-6fed25c000 ---p 00000000 00:00 0                              [anon:cfi shadow]
+6fed25c000-6fed25f000 r--p 00000000 fb:00 1840                           /system/lib64/libnetd_client.so
+6fed25f000-6fed263000 r-xp 00003000 fb:00 1840                           /system/lib64/libnetd_client.so
+6fed263000-6fed264000 r--p 00007000 fb:00 1840                           /system/lib64/libnetd_client.so
+6fed264000-6fed265000 rw-p 00007000 fb:00 1840                           /system/lib64/libnetd_client.so
+6fed2a6000-6fed2a7000 ---p 00000000 00:00 0 
+6fed2a7000-6fed2e7000 rw-p 00000000 00:00 0                              [anon:scudo:primary]
+6fed2e7000-6ffd2a8000 ---p 00000000 00:00 0 
+6ffd2a8000-6ffd2e8000 rw-p 00000000 00:00 0                              [anon:scudo:primary]
+6ffd2e8000-700d2a7000 ---p 00000000 00:00 0 
+700d2a7000-700d2e7000 rw-p 00000000 00:00 0                              [anon:scudo:primary]
+700d2e7000-701d2b2000 ---p 00000000 00:00 0 
+701d2b2000-701d2f2000 rw-p 00000000 00:00 0                              [anon:scudo:primary]
+701d2f2000-702d2ab000 ---p 00000000 00:00 0 
+702d2ab000-702d2eb000 rw-p 00000000 00:00 0                              [anon:scudo:primary]
+702d2eb000-703d2b2000 ---p 00000000 00:00 0 
+703d2b2000-703d2f2000 rw-p 00000000 00:00 0                              [anon:scudo:primary]
+703d2f2000-704d2aa000 ---p 00000000 00:00 0 
+704d2aa000-704d2ea000 rw-p 00000000 00:00 0                              [anon:scudo:primary]
+704d2ea000-705d2af000 ---p 00000000 00:00 0 
+705d2af000-705d2ef000 rw-p 00000000 00:00 0                              [anon:scudo:primary]
+705d2ef000-706d2b4000 ---p 00000000 00:00 0 
+706d2b4000-706d2f4000 rw-p 00000000 00:00 0                              [anon:scudo:primary]
+706d2f4000-707d2ac000 ---p 00000000 00:00 0 
+707d2ac000-707d2ec000 rw-p 00000000 00:00 0                              [anon:scudo:primary]
+707d2ec000-709d2af000 ---p 00000000 00:00 0 
+709d2af000-709d2ef000 rw-p 00000000 00:00 0                              [anon:scudo:primary]
+709d2ef000-70ad2ae000 ---p 00000000 00:00 0 
+70ad2ae000-70ad2ee000 rw-p 00000000 00:00 0                              [anon:scudo:primary]
+70ad2ee000-70bd2b0000 ---p 00000000 00:00 0 
+70bd2b0000-70bd2f0000 rw-p 00000000 00:00 0                              [anon:scudo:primary]
+70bd2f0000-70cd2b3000 ---p 00000000 00:00 0 
+70cd2b3000-70cd2f3000 rw-p 00000000 00:00 0                              [anon:scudo:primary]
+70cd2f3000-70ed2b4000 ---p 00000000 00:00 0 
+70ed2b4000-70ed2f4000 rw-p 00000000 00:00 0                              [anon:scudo:primary]
+70ed2f4000-712d2b3000 ---p 00000000 00:00 0 
+712d2b3000-712d2f3000 rw-p 00000000 00:00 0                              [anon:scudo:primary]
+712d2f3000-714d2b4000 ---p 00000000 00:00 0 
+714d2b4000-714d2f4000 rw-p 00000000 00:00 0                              [anon:scudo:primary]
+714d2f4000-71fd2a6000 ---p 00000000 00:00 0 
+71fd2a6000-71fd2ab000 r--p 00000000 fb:10 407                            /vendor/lib64/android.hardware.graphics.composer@2.1-resources.so
+71fd2ab000-71fd2af000 r-xp 00005000 fb:10 407                            /vendor/lib64/android.hardware.graphics.composer@2.1-resources.so
+71fd2af000-71fd2b0000 r--p 00009000 fb:10 407                            /vendor/lib64/android.hardware.graphics.composer@2.1-resources.so
+71fd2f5000-71fd2f6000 r--p 00000000 07:06 258                            /apex/com.android.vndk.v30/lib64/libhardware.so
+71fd2f6000-71fd2f7000 r-xp 00001000 07:06 258                            /apex/com.android.vndk.v30/lib64/libhardware.so
+71fd2f7000-71fd2f8000 r--p 00002000 07:06 258                            /apex/com.android.vndk.v30/lib64/libhardware.so
+71fd30f000-71fd310000 r--p 00000000 fb:10 408                            /vendor/lib64/android.hardware.graphics.composer@2.2-resources.so
+71fd310000-71fd311000 r-xp 00001000 fb:10 408                            /vendor/lib64/android.hardware.graphics.composer@2.2-resources.so
+71fd311000-71fd312000 r--p 00002000 fb:10 408                            /vendor/lib64/android.hardware.graphics.composer@2.2-resources.so
+71fd357000-71fd366000 r--p 00000000 07:06 118                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.mapper@4.0.so
+71fd366000-71fd378000 r-xp 0000f000 07:06 118                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.mapper@4.0.so
+71fd378000-71fd37b000 r--p 00021000 07:06 118                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.mapper@4.0.so
+71fd37b000-71fd37c000 rw-p 00023000 07:06 118                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.mapper@4.0.so
+71fd390000-71fd3cc000 r--p 00000000 07:06 233                            /apex/com.android.vndk.v30/lib64/libbinder.so
+71fd3cc000-71fd406000 r-xp 0003c000 07:06 233                            /apex/com.android.vndk.v30/lib64/libbinder.so
+71fd406000-71fd413000 r--p 00076000 07:06 233                            /apex/com.android.vndk.v30/lib64/libbinder.so
+71fd413000-71fd414000 rw-p 00082000 07:06 233                            /apex/com.android.vndk.v30/lib64/libbinder.so
+71fd414000-71fd415000 rw-p 00000000 00:00 0                              [anon:.bss]
+71fd447000-71fd458000 r--p 00000000 07:1a 20                             /apex/com.android.runtime/lib64/bionic/libm.so
+71fd458000-71fd47c000 r-xp 00011000 07:1a 20                             /apex/com.android.runtime/lib64/bionic/libm.so
+71fd47c000-71fd47d000 r--p 00035000 07:1a 20                             /apex/com.android.runtime/lib64/bionic/libm.so
+71fd47d000-71fd47e000 rw-p 00035000 07:1a 20                             /apex/com.android.runtime/lib64/bionic/libm.so
+71fd4b7000-71fd4b8000 r--p 00000000 07:1a 19                             /apex/com.android.runtime/lib64/bionic/libdl_android.so
+71fd4b8000-71fd4b9000 r-xp 00001000 07:1a 19                             /apex/com.android.runtime/lib64/bionic/libdl_android.so
+71fd4b9000-71fd4ba000 r--p 00002000 07:1a 19                             /apex/com.android.runtime/lib64/bionic/libdl_android.so
+71fd4c8000-71fd513000 r--p 00000000 07:06 236                            /apex/com.android.vndk.v30/lib64/libc++.so
+71fd513000-71fd56c000 r-xp 0004b000 07:06 236                            /apex/com.android.vndk.v30/lib64/libc++.so
+71fd56c000-71fd573000 r--p 000a4000 07:06 236                            /apex/com.android.vndk.v30/lib64/libc++.so
+71fd573000-71fd574000 rw-p 000aa000 07:06 236                            /apex/com.android.vndk.v30/lib64/libc++.so
+71fd574000-71fd577000 rw-p 00000000 00:00 0                              [anon:.bss]
+71fd583000-71fd592000 r--p 00000000 fb:00 1661                           /system/lib64/libbase.so
+71fd592000-71fd5be000 r-xp 0000f000 fb:00 1661                           /system/lib64/libbase.so
+71fd5be000-71fd5bf000 r--p 0003b000 fb:00 1661                           /system/lib64/libbase.so
+71fd5bf000-71fd5c0000 rw-p 0003b000 fb:00 1661                           /system/lib64/libbase.so
+71fd5d0000-71fd5d2000 r--p 00000000 fb:00 1687                           /system/lib64/libcgrouprc.so
+71fd5d2000-71fd5d3000 r-xp 00002000 fb:00 1687                           /system/lib64/libcgrouprc.so
+71fd5d3000-71fd5d4000 r--p 00003000 fb:00 1687                           /system/lib64/libcgrouprc.so
+71fd5d4000-71fd5d5000 rw-p 00003000 fb:00 1687                           /system/lib64/libcgrouprc.so
+71fd608000-71fd626000 r--p 00000000 07:06 113                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.composer@2.3.so
+71fd626000-71fd64e000 r-xp 0001e000 07:06 113                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.composer@2.3.so
+71fd64e000-71fd654000 r--p 00046000 07:06 113                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.composer@2.3.so
+71fd654000-71fd655000 rw-p 0004b000 07:06 113                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.composer@2.3.so
+71fd686000-71fd6cc000 r--p 00000000 07:06 261                            /apex/com.android.vndk.v30/lib64/libhidlbase.so
+71fd6cc000-71fd732000 r-xp 00046000 07:06 261                            /apex/com.android.vndk.v30/lib64/libhidlbase.so
+71fd732000-71fd73d000 r--p 000ac000 07:06 261                            /apex/com.android.vndk.v30/lib64/libhidlbase.so
+71fd73d000-71fd73f000 rw-p 000b6000 07:06 261                            /apex/com.android.vndk.v30/lib64/libhidlbase.so
+71fd74e000-71fd750000 r--p 00000000 07:06 254                            /apex/com.android.vndk.v30/lib64/libfmq.so
+71fd750000-71fd751000 r-xp 00002000 07:06 254                            /apex/com.android.vndk.v30/lib64/libfmq.so
+71fd751000-71fd752000 r--p 00003000 07:06 254                            /apex/com.android.vndk.v30/lib64/libfmq.so
+71fd783000-71fd792000 r--p 00000000 07:06 299                            /apex/com.android.vndk.v30/lib64/libutils.so
+71fd792000-71fd79f000 r-xp 0000f000 07:06 299                            /apex/com.android.vndk.v30/lib64/libutils.so
+71fd79f000-71fd7a0000 r--p 0001c000 07:06 299                            /apex/com.android.vndk.v30/lib64/libutils.so
+71fd7a0000-71fd7a1000 rw-p 0001c000 07:06 299                            /apex/com.android.vndk.v30/lib64/libutils.so
+71fd7cf000-71fd7d6000 r--p 00000000 07:06 248                            /apex/com.android.vndk.v30/lib64/libcutils.so
+71fd7d6000-71fd7de000 r-xp 00007000 07:06 248                            /apex/com.android.vndk.v30/lib64/libcutils.so
+71fd7de000-71fd7e0000 r--p 0000f000 07:06 248                            /apex/com.android.vndk.v30/lib64/libcutils.so
+71fd7e0000-71fd7e1000 rw-p 00010000 07:06 248                            /apex/com.android.vndk.v30/lib64/libcutils.so
+71fd81b000-71fd81c000 r--p 00000000 fb:00 1911                           /system/lib64/libsync.so
+71fd81c000-71fd81d000 r-xp 00001000 fb:00 1911                           /system/lib64/libsync.so
+71fd81d000-71fd81e000 r--p 00002000 fb:00 1911                           /system/lib64/libsync.so
+71fd81e000-71fd81f000 rw-p 00002000 fb:00 1911                           /system/lib64/libsync.so
+71fd840000-71fd857000 r--p 00000000 07:06 281                            /apex/com.android.vndk.v30/lib64/libprocessgroup.so
+71fd857000-71fd87c000 r-xp 00017000 07:06 281                            /apex/com.android.vndk.v30/lib64/libprocessgroup.so
+71fd87c000-71fd87e000 r--p 0003c000 07:06 281                            /apex/com.android.vndk.v30/lib64/libprocessgroup.so
+71fd87e000-71fd87f000 rw-p 0003d000 07:06 281                            /apex/com.android.vndk.v30/lib64/libprocessgroup.so
+71fd8ad000-71fd8c7000 r--p 00000000 07:06 111                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.composer@2.1.so
+71fd8c7000-71fd8f1000 r-xp 0001a000 07:06 111                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.composer@2.1.so
+71fd8f1000-71fd8f6000 r--p 00044000 07:06 111                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.composer@2.1.so
+71fd8f6000-71fd8f7000 rw-p 00048000 07:06 111                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.composer@2.1.so
+71fd933000-71fd934000 r--p 00000000 07:1a 18                             /apex/com.android.runtime/lib64/bionic/libdl.so
+71fd934000-71fd935000 r-xp 00001000 07:1a 18                             /apex/com.android.runtime/lib64/bionic/libdl.so
+71fd935000-71fd936000 r--p 00002000 07:1a 18                             /apex/com.android.runtime/lib64/bionic/libdl.so
+71fd936000-71fd937000 ---p 00000000 00:00 0 
+71fd937000-71fd938000 r--p 00000000 00:00 0                              [anon:.bss]
+71fd942000-71fd943000 rw-p 00000000 00:00 0                              [anon:bionic_alloc_small_objects]
+71fd949000-71fd994000 r--p 00000000 fb:00 1679                           /system/lib64/libc++.so
+71fd994000-71fd9ed000 r-xp 0004b000 fb:00 1679                           /system/lib64/libc++.so
+71fd9ed000-71fd9f4000 r--p 000a4000 fb:00 1679                           /system/lib64/libc++.so
+71fd9f4000-71fd9f5000 rw-p 000aa000 fb:00 1679                           /system/lib64/libc++.so
+71fd9f5000-71fd9f8000 rw-p 00000000 00:00 0                              [anon:.bss]
+71fda01000-71fda10000 r--p 00000000 07:06 231                            /apex/com.android.vndk.v30/lib64/libbase.so
+71fda10000-71fda3c000 r-xp 0000f000 07:06 231                            /apex/com.android.vndk.v30/lib64/libbase.so
+71fda3c000-71fda3d000 r--p 0003b000 07:06 231                            /apex/com.android.vndk.v30/lib64/libbase.so
+71fda3d000-71fda3e000 rw-p 0003b000 07:06 231                            /apex/com.android.vndk.v30/lib64/libbase.so
+71fda51000-71fda5d000 r--p 00000000 07:06 117                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.mapper@3.0.so
+71fda5d000-71fda6a000 r-xp 0000c000 07:06 117                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.mapper@3.0.so
+71fda6a000-71fda6c000 r--p 00019000 07:06 117                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.mapper@3.0.so
+71fda6c000-71fda6d000 rw-p 0001a000 07:06 117                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.mapper@3.0.so
+71fda80000-71fda98000 r--p 00000000 07:06 112                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.composer@2.2.so
+71fda98000-71fdab7000 r-xp 00018000 07:06 112                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.composer@2.2.so
+71fdab7000-71fdabc000 r--p 00037000 07:06 112                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.composer@2.2.so
+71fdabc000-71fdabd000 rw-p 0003b000 07:06 112                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.composer@2.2.so
+71fdaec000-71fdaf1000 r--p 00000000 fb:00 1799                           /system/lib64/liblog.so
+71fdaf1000-71fdafc000 r-xp 00005000 fb:00 1799                           /system/lib64/liblog.so
+71fdafc000-71fdafd000 r--p 00010000 fb:00 1799                           /system/lib64/liblog.so
+71fdafd000-71fdafe000 rw-p 00010000 fb:00 1799                           /system/lib64/liblog.so
+71fdb1b000-71fdb1c000 rw-p 00000000 00:00 0                              [anon:bionic_alloc_small_objects]
+71fdb2b000-71fdb2e000 r--p 00000000 fb:10 465                            /vendor/lib64/libhwc2onfbadapter.so
+71fdb2e000-71fdb31000 r-xp 00003000 fb:10 465                            /vendor/lib64/libhwc2onfbadapter.so
+71fdb31000-71fdb32000 r--p 00006000 fb:10 465                            /vendor/lib64/libhwc2onfbadapter.so
+71fdb5d000-71fdb68000 r--p 00000000 07:06 115                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.mapper@2.0.so
+71fdb68000-71fdb73000 r-xp 0000b000 07:06 115                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.mapper@2.0.so
+71fdb73000-71fdb75000 r--p 00016000 07:06 115                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.mapper@2.0.so
+71fdb75000-71fdb76000 rw-p 00017000 07:06 115                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.mapper@2.0.so
+71fdb99000-71fdba7000 r--p 00000000 fb:10 464                            /vendor/lib64/libhwc2on1adapter.so
+71fdba7000-71fdbbc000 r-xp 0000e000 fb:10 464                            /vendor/lib64/libhwc2on1adapter.so
+71fdbbc000-71fdbbd000 r--p 00023000 fb:10 464                            /vendor/lib64/libhwc2on1adapter.so
+71fdbbd000-71fdbbe000 rw-p 00023000 fb:10 464                            /vendor/lib64/libhwc2on1adapter.so
+71fdbc3000-71fdbc4000 r--p 00000000 07:06 110                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.common@1.2.so
+71fdbc4000-71fdbc5000 r-xp 00001000 07:06 110                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.common@1.2.so
+71fdbc5000-71fdbc6000 r--p 00002000 07:06 110                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.common@1.2.so
+71fdbd0000-71fdc34000 rw-p 00000000 00:00 0                              [anon:linker_alloc]
+71fdc34000-71fdc35000 r--p 00000000 fb:00 1927                           /system/lib64/libvndksupport.so
+71fdc35000-71fdc36000 r-xp 00001000 fb:00 1927                           /system/lib64/libvndksupport.so
+71fdc36000-71fdc37000 r--p 00002000 fb:00 1927                           /system/lib64/libvndksupport.so
+71fdc37000-71fdc38000 rw-p 00002000 fb:00 1927                           /system/lib64/libvndksupport.so
+71fdc43000-71fdc7e000 r--p 00000000 07:1a 17                             /apex/com.android.runtime/lib64/bionic/libc.so
+71fdc7e000-71fdcf9000 r-xp 0003b000 07:1a 17                             /apex/com.android.runtime/lib64/bionic/libc.so
+71fdcf9000-71fdcfd000 r--p 000b6000 07:1a 17                             /apex/com.android.runtime/lib64/bionic/libc.so
+71fdcfd000-71fdd00000 rw-p 000b9000 07:1a 17                             /apex/com.android.runtime/lib64/bionic/libc.so
+71fdd00000-71fdd03000 rw-p 00000000 00:00 0                              [anon:.bss]
+71fdd03000-71fdd04000 r--p 00000000 00:00 0                              [anon:.bss]
+71fdd04000-71fdd12000 rw-p 00000000 00:00 0                              [anon:.bss]
+71fdd6e000-71fdd6f000 r--p 00000000 07:06 108                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.common@1.0.so
+71fdd6f000-71fdd70000 r-xp 00001000 07:06 108                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.common@1.0.so
+71fdd70000-71fdd71000 r--p 00002000 07:06 108                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.common@1.0.so
+71fddb6000-71fddb7000 r--p 00000000 07:06 109                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.common@1.1.so
+71fddb7000-71fddb8000 r-xp 00001000 07:06 109                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.common@1.1.so
+71fddb8000-71fddb9000 r--p 00002000 07:06 109                            /apex/com.android.vndk.v30/lib64/android.hardware.graphics.common@1.1.so
+71fde45000-71fde65000 r--s 00000000 00:12 7711                           /dev/__properties__/u:object_r:vndk_prop:s0
+71fde65000-71fde85000 r--s 00000000 00:12 7641                           /dev/__properties__/u:object_r:hwservicemanager_prop:s0
+71fde85000-71fdea5000 r--s 00000000 00:12 7650                           /dev/__properties__/u:object_r:logd_prop:s0
+71fdea5000-71fdec5000 r--s 00000000 00:12 7649                           /dev/__properties__/u:object_r:log_tag_prop:s0
+71fdec5000-71fdee5000 r--s 00000000 00:12 7640                           /dev/__properties__/u:object_r:heapprofd_prop:s0
+71fdee5000-71fdf05000 r--s 00000000 00:12 7606                           /dev/__properties__/u:object_r:exported2_default_prop:s0
+71fdf05000-71fdf25000 r--s 00000000 00:12 7585                           /dev/__properties__/u:object_r:debug_prop:s0
+71fdf25000-71fdf45000 r--s 00000000 00:12 7715                           /dev/__properties__/properties_serial
+71fdf45000-71fdf50000 r--s 00000000 00:12 7545                           /dev/__properties__/property_info
+71fdf59000-71fdf5a000 ---p 00000000 00:00 0 
+71fdf5a000-71fdf62000 rw-p 00000000 00:00 0                              [anon:thread signal stack]
+71fdf62000-71fdf63000 ---p 00000000 00:00 0 
+71fdf63000-71fdf6b000 rw-p 00000000 00:00 0                              [anon:thread signal stack]
+71fdf6b000-71fdf8b000 r--s 00000000 00:12 7618                           /dev/__properties__/u:object_r:exported_default_prop:s0
+71fdf8b000-71fdf8c000 ---p 00000000 00:00 0 
+71fdf8c000-71fdf94000 rw-p 00000000 00:00 0                              [anon:thread signal stack]
+71fdf94000-71fdfb4000 r--s 00000000 00:12 7709                           /dev/__properties__/u:object_r:vendor_socket_hook_prop:s0
+71fdfb4000-71fe018000 r--p 00000000 00:00 0                              [anon:linker_alloc]
+71fe018000-71fe019000 rw-p 00000000 00:00 0                              [anon:bionic_alloc_small_objects]
+71fe01a000-71fe01b000 rw-p 00000000 00:00 0                              [anon:bionic_alloc_small_objects]
+71fe01e000-71fe022000 r--p 00000000 00:00 0                              [anon:atexit handlers]
+71fe022000-71fe024000 rw-p 00000000 00:00 0                              [anon:bionic_alloc_small_objects]
+71fe024000-71fe088000 r--p 00000000 00:00 0                              [anon:linker_alloc]
+71fe088000-71fe0a8000 r--s 00000000 00:12 7711                           /dev/__properties__/u:object_r:vndk_prop:s0
+71fe0a8000-71fe0a9000 rw-p 00000000 00:00 0                              [anon:bionic_alloc_small_objects]
+71fe0ac000-71fe0b0000 rw-p 00000000 00:00 0                              [anon:bionic_alloc_small_objects]
+71fe0b4000-71fe0b5000 ---p 00000000 00:00 0 
+71fe0b5000-71fe0b9000 rw-p 00000000 00:00 0                              [anon:stack_and_tls:main]
+71fe0b9000-71fe0ba000 ---p 00000000 00:00 0 
+71fe0ba000-71fe0be000 rw-p 00000000 00:00 0                              [anon:bionic_alloc_small_objects]
+71fe0be000-71fe0c1000 rw-p 00000000 00:00 0                              [anon:bionic_alloc_lob]
+71fe0c1000-71fe0c3000 rw-p 00000000 00:00 0                              [anon:bionic_alloc_small_objects]
+71fe0c3000-71fe0c4000 rw-p 00000000 00:00 0                              [anon:bionic_alloc_lob]
+71fe0c4000-71fe0c7000 rw-p 00000000 00:00 0                              [anon:bionic_alloc_small_objects]
+71fe0c7000-71fe12b000 r--p 00000000 00:00 0                              [anon:linker_alloc]
+71fe12b000-71fe12c000 rw-p 00000000 00:00 0                              [anon:bionic_alloc_small_objects]
+71fe12c000-71fe14c000 r--s 00000000 00:12 7585                           /dev/__properties__/u:object_r:debug_prop:s0
+71fe14c000-71fe16c000 r--s 00000000 00:12 7606                           /dev/__properties__/u:object_r:exported2_default_prop:s0
+71fe16c000-71fe16d000 ---p 00000000 00:00 0 
+71fe16d000-71fe175000 rw-p 00000000 00:00 0 
+71fe175000-71fe176000 ---p 00000000 00:00 0 
+71fe176000-71fe196000 r--s 00000000 00:12 7715                           /dev/__properties__/properties_serial
+71fe196000-71fe198000 rw-p 00000000 00:00 0                              [anon:System property context nodes]
+71fe198000-71fe1a3000 r--s 00000000 00:12 7545                           /dev/__properties__/property_info
+71fe1a3000-71fe207000 r--p 00000000 00:00 0                              [anon:linker_alloc]
+71fe207000-71fe209000 rw-p 00000000 00:00 0                              [anon:bionic_alloc_small_objects]
+71fe209000-71fe20a000 r--p 00000000 00:00 0                              [anon:atexit handlers]
+71fe20a000-71fec2c000 ---p 00000000 00:00 0 
+71fec2c000-71fec2e000 rw-p 00000000 00:00 0 
+71fec2e000-71ff20a000 ---p 00000000 00:00 0 
+71ff20a000-71ff20b000 ---p 00000000 00:00 0 
+71ff20b000-71ff213000 rw-p 00000000 00:00 0                              [anon:thread signal stack]
+71ff213000-71ff214000 rw-p 00000000 00:00 0                              [anon:arc4random data]
+71ff214000-71ff216000 rw-p 00000000 00:00 0                              [anon:System property context nodes]
+71ff216000-71ff217000 rw-p 00000000 00:00 0                              [anon:arc4random data]
+71ff217000-71ff218000 r--p 00000000 00:00 0                              [vvar]
+71ff218000-71ff219000 r-xp 00000000 00:00 0                              [vdso]
+71ff219000-71ff24a000 r--p 00000000 07:1a 13                             /apex/com.android.runtime/bin/linker64
+71ff24a000-71ff2fe000 r-xp 00031000 07:1a 13                             /apex/com.android.runtime/bin/linker64
+71ff2fe000-71ff305000 r--p 000e5000 07:1a 13                             /apex/com.android.runtime/bin/linker64
+71ff305000-71ff307000 rw-p 000eb000 07:1a 13                             /apex/com.android.runtime/bin/linker64
+71ff307000-71ff30b000 rw-p 00000000 00:00 0                              [anon:.bss]
+71ff30b000-71ff30c000 r--p 00000000 00:00 0                              [anon:.bss]
+71ff30c000-71ff312000 rw-p 00000000 00:00 0                              [anon:.bss]
+7fce294000-7fce2b5000 rw-p 00000000 00:00 0                              [stack]

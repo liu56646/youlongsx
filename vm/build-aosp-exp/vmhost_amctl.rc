@@ -1,0 +1,43 @@
+# VMHost · 方案 2：注册 IActivityController，抑制 Watchdog 的 SIGKILL。
+#
+# 为什么需要：TCG 全虚拟化下 system_server 主线程偶发 >60s 阻塞，而
+# services.jar 里 Watchdog.java 的 DEFAULT_TIMEOUT 硬编码 60s，判定 OVERDUE 后
+# 直接 Process.killProcess(myPid()) -> zygote 自杀重启 -> sys.boot_completed 反复丢失。
+# Watchdog.run() 里唯一能让它「只回调不杀」的口子就是 mController。
+#
+# 以 root(uid 0) 运行：ActivityTaskManagerService.setActivityController 强制
+# android.Manifest.permission.SET_ACTIVITY_WATCHER（signature 级），uid 0 直接 GRANTED。
+# 程序自身会轮询 "activity" 服务并周期性重注册，所以早启动没关系（system_server 还没起来时
+# 只会打印 activity service not ready）。
+#
+# 注意 seclabel：guest 内核虽是 permissive，但 init 自身会做「文件标签/域转换」检查，
+# 新建的 sh 脚本文件是 u:object_r:unlabeled:s0，init 会拒绝启动并报
+# "has incorrect label or no domain transition from u:r:init:s0"。
+# 因此这里显式指定一个已定义的域来绕过该检查。
+#
+# 选 incidentd 的依据（从 guest 的 /system/etc/selinux/plat_sepolicy.cil 里查到）：
+#   (allow incidentd system_server_service (service_manager (find)))   <- activity_service 属于该 attr
+#   (allow incidentd app_api_service     (service_manager (find)))
+#   (allow incidentd system_server (binder (call transfer)))           <- 我们向 AMS 注册控制器
+#   (allow system_server incidentd (binder (call transfer)))           <- AMS/Watchdog 回调 systemNotResponding
+# 而原先用的 hal_graphics_composer_default 没有任何 service_manager find 权限，
+# 在 enforcing 下 ServiceManager.getService("activity") 会恒为 null。
+service vmhost_amctl /system/bin/sh /system/bin/vmhost_amctl.sh
+    class late_start
+    user root
+    group root system
+    seclabel u:r:incidentd:s0
+    stdio_to_kmsg
+
+# 额外保险：本 guest 以 androidboot.selinux=permissive 启动，但若 init 实际落到
+# enforcing（audit=0 会把拒绝藏起来），这里尽力再置一次；失败只是多一行日志。
+on early-init
+    write /sys/fs/selinux/enforce 0
+
+on post-fs
+    write /sys/fs/selinux/enforce 0
+
+# 尽早拉起：system_server 比 zygote 晚，且每次重启都会丢弃控制器，
+# 但程序会持续重注册自愈，所以只要进程活着即可。
+on zygote-start
+    start vmhost_amctl

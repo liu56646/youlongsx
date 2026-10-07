@@ -1,0 +1,19 @@
+# VMHost: 补建 /dev/input —— Android 11 起 EventHub 对「/dev/input 目录不存在」是致命的。
+#
+# 实测证据（crashlite -> /metadata/crash.log，12/12 一致）：
+#   [ANDROID_LOG_ASSERT] tag=EventHub cond=mInputWd < 0
+#   Could not register INotify for /dev/input: No such file or directory
+#   -> system_server 的 Binder 线程在 InputManagerService nativeInit 里 abort(SIGABRT)
+#   -> zygote 见 system_server 死 -> 自杀重启，无限循环，sys.boot_completed 永不置位。
+#
+# 本 guest 无任何输入设备（-display none / 无 virtio-input），ueventd 从不创建 /dev/input。
+# EventHub 只是 inotify 监听该目录（加入/移除设备），空目录即可满足。
+# 模式沿用 AOSP 约定 0775 root:input —— system_server 的 id 组里含 AID_INPUT。
+on early-init
+    mkdir /dev/input 0775 root input
+
+on post-fs
+    mkdir /dev/input 0775 root input
+
+on boot
+    mkdir /dev/input 0775 root input

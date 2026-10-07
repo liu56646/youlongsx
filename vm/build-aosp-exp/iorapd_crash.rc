@@ -1,0 +1,15 @@
+# VMHost 调试版：iorapd 走 wrapper，LD_PRELOAD 轻量崩溃捕获库（写 /metadata/crash.log）
+service iorapd /system/bin/sh /system/bin/vmhost_iorapd_wrap.sh
+    class main
+    user iorapd
+    group iorapd
+    capabilities DAC_READ_SEARCH
+    seclabel u:r:iorapd:s0
+    writepid /dev/cpuset/system-background/tasks
+
+on property:ro.iorapd.enable=false
+    stop iorapd
+
+on post-fs-data
+    # Create directory for iorapd (see iorapd_data_file in selinux file_contexts).
+    mkdir /data/misc/iorapd/ 0750 iorapd system

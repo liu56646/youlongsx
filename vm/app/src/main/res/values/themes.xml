@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <style name="Theme.VmHost" parent="Theme.Material3.DayNight.NoActionBar" />
+
+    <!-- 实例运行时：全屏黑底，避免宿主装饰元素泄漏到访客画面 -->
+    <style name="Theme.VmHost.Fullscreen" parent="Theme.VmHost">
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:windowContentOverlay">@null</item>
+    </style>
+
+</resources>
