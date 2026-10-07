@@ -1,4 +1,4 @@
-# 游龙沙箱协议（Youlong Sandbox Protocol）
+# 游龙沙箱（Youlong Sandbox）
 
 > 在 Android 手机上运行**完整的访客 Android 系统**的自研虚拟机 / 沙箱方案（QEMU 型）。
 > 支持多实例、可视化交互、免 root 安装运行未安装 APK。
@@ -7,7 +7,7 @@
 
 ## 1. 这是什么
 
-「游龙沙箱协议」是一套 **Android-in-Android** 的系统级虚拟化方案：
+「游龙沙箱」是一套 **Android-in-Android** 的系统级虚拟化方案：
 用一个自编译的 QEMU（TCG 软件模拟，ranchu/goldfish 机器）在宿主 Android 手机里
 跑起一个**完整的访客 Android 系统**（当前目标为自编译 AOSP，Android 11 / API 30），
 并把访客画面回传、宿主触摸注入给访客，做到「像原生 App 一样使用整个访客系统」。

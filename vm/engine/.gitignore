@@ -1,2 +1,5 @@
 # QEMU 预编译静态产物（由 scripts/package_qemu_static.sh 生成，约 160 MB）
 /src/main/cpp/prebuilt/
+
+# QEMU 预编译可执行体（107 MB，超 GitHub 单文件 100 MB 上限；由 scripts 重建）
+/src/main/jniLibs/arm64-v8a/libqemu_exec.so
