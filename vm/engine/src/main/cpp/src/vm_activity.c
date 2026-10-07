@@ -17,6 +17,8 @@
 
 #define TAG "VmNative"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
 /* 停机等待上限。QEMU 返回前要 qemu_cleanup() 刷写镜像，给足时间但不无限等。 */
 #define QEMU_STOP_TIMEOUT_MS 5000
@@ -87,6 +89,11 @@ void android_main(struct android_app* app) {
     LOGI("android_main enter");
     vm_engine_on_instance_start(app);
 
+#ifdef VM_WITH_QEMU
+    int ticks = 0;
+    bool qemu_was_running = false;
+#endif
+
     while (!app->destroyRequested) {
         int events;
         struct android_poll_source* source = NULL;
@@ -101,6 +108,21 @@ void android_main(struct android_app* app) {
         if (app->window != NULL) {
             vm_render_frame();
         }
+
+#ifdef VM_WITH_QEMU
+        /* 每约 1 秒确认一次 QEMU 还在不在：子进程退出若不在这里发现，
+           进程会一直留成僵尸，事后只看到"日志突然停了"而不知死因。 */
+        if (++ticks >= 60) {
+            ticks = 0;
+            const bool running = vm_qemu_is_running();
+            if (running) {
+                qemu_was_running = true;
+            } else if (qemu_was_running) {
+                qemu_was_running = false;
+                LOGE("QEMU 已停止运行（退出原因见上一条 VmQemu 日志）");
+            }
+        }
+#endif
     }
 
     /* 兜底停机：Activity 不一定总是走 APP_CMD_DESTROY 这条路

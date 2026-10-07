@@ -120,6 +120,47 @@ static void ensure_log_dir(const char *data_dir)
     }
 }
 
+/**
+ * 极简 JSON 整数取值。
+ * 数值字段在 JSON 里没有引号，不能用 json_get_string（会误取后面键的引号），
+ * 因此单列一个只认数字的取法；取不到或值非法时返回 fallback。
+ */
+static int json_get_int(const char *json, const char *key, int fallback)
+{
+    if (json == NULL || key == NULL) {
+        return fallback;
+    }
+
+    char pattern[64];
+    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+
+    const char *p = strstr(json, pattern);
+    if (p == NULL) {
+        return fallback;
+    }
+    p = strchr(p + strlen(pattern), ':');
+    if (p == NULL) {
+        return fallback;
+    }
+    p++;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') {
+        p++;
+    }
+    if (*p < '0' || *p > '9') {
+        return fallback;
+    }
+
+    long v = 0;
+    while (*p >= '0' && *p <= '9') {
+        v = v * 10 + (*p - '0');
+        if (v > 1000000) {
+            break; /* 防御：异常大的数字不再累加（后续会被 QEMU 侧拒绝） */
+        }
+        p++;
+    }
+    return (int) v;
+}
+
 /** 依据实例配置拼出 QEMU 启动参数并拉起 QEMU。 */
 static void vm_engine_boot_qemu(void)
 {
@@ -156,6 +197,10 @@ static void vm_engine_boot_qemu(void)
     json_get_string(s_config_json, "netMode", net_mode, sizeof(net_mode));
     const bool want_network = (strcmp(net_mode, "NONE") != 0);
 
+    /* 内存 / vCPU 数从 VmConfig 取（缺省或非法时回落 2048 MB / 4 核） */
+    const int memory_mb = json_get_int(s_config_json, "memoryMb", 2048);
+    const int cores = json_get_int(s_config_json, "cores", 4);
+
     VmQemuParams params = {
             .kernel_path = s_path_kernel,
             .initrd_path = s_path_initrd,
@@ -166,8 +211,8 @@ static void vm_engine_boot_qemu(void)
             .metadata_img_path = s_path_metadata,
             .userdata_img_path = s_path_userdata,
             .serial_log_path = s_path_console,
-            .memory_mb = 2048,
-            .cores = 4,
+            .memory_mb = memory_mb,
+            .cores = cores,
             .enable_network = want_network,
     };
 

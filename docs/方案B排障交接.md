@@ -87,3 +87,67 @@ QEMU 为自编 AOSP qemu 2.12（`/dev/vexp/qemu-system-aarch64`）。
   导致 `-d guest_errors` 未生效）。
 - guest 串口日志在真机 `/data/local/tmp/d1a.log`（全量 dmesg，`ignore_loglevel`）；
   host stderr 在 `/data/local/tmp/d1a_run.log`（VMHOSTGFX/VMHOSTGPU/VMHOSTMMIO/VMHOSTVSS）。
+
+## 7. 2026-10-07：宿主侧回传链路已补齐，卡点收敛到子进程 SIGSEGV
+
+### 7.1 远端已合并的修复（PR #1，commit `9bf2875` / merge `617574d`）
+
+- **子进程可执行体终于会进包**：`build_qemu_aosp.sh` 新增安装步骤，把可执行体装成
+  `jniLibs/<abi>/libqemu_exec.so`（chmod 0755）并补齐运行时依赖；`engine/build.gradle.kts`
+  加 `keepDebugSymbols`，避免 AGP 把 PIE 可执行体当普通 .so 去 strip。
+  （此前 `file_ok(exe)` 永远失败，每次都静默退回跑不起来的进程内嵌 `-M virt`。）
+- **新增 `vm_frame_relay.{c,h}`**：引擎侧的帧回传**消费端**（此前只有生产者
+  `vmhost_gfx_glue.cpp`）。含坏帧重试（同一 seq 连续 3 次解码失败就跳过并重新请求）。
+- `vm_guest_display.c` 改双路径（内嵌优先、取不到回落文件回传）；`vm_qemu.{c,h}` 新增
+  `vm_qemu_is_child_process()` 与候选可执行体名；`vm_engine.c` 在子进程模式下设回传目录
+  `<dataDir>/logs`；`vm_activity.c` / `vm_qemu.h` 用 `VM_WITH_QEMU` 收口（骨架构建下
+  原先因 `vm_qemu_stop` 未定义而 dlopen 失败）。
+- `vmhost_gfx_glue.cpp`：修 `getScreenshot` 兜底路径把 RGBA(4B/px) 写进 P6(3B/px) 文件的
+  bug，并加 cap 越界校验。
+
+> 该 PR 的验证是**静态的**（作者本机无 C 工具链 / NDK / WSL，只做了语法检查与
+> Python 协议对跑）；其代码已在本机重编通过（`:app:assembleDebug` BUILD SUCCESSFUL）。
+
+### 7.2 本机真机实测（真机 cc96ded5，App 实例 `vm_1`，访客 `p11_arm64`）
+
+| 项 | 结果 |
+|---|---|
+| 引擎进入回传模式 | ✅ `vm_frame_relay` 目录 = `<dataDir>/logs` |
+| 子进程起来 | ✅ `已拉起子进程 QEMU（ranchu 模式）pid=…`（走 jniLibs 里的可执行体） |
+| QEMU 侧截图线程 | ✅ stderr 里 `VMHOSTGFX screenshot: …` 持续输出，`frame.request` 被消费 |
+| 访客图形栈 | ✅ 96s `gralloc-3-0`、97s `hwcomposer-2-3`、116s `surfaceflinger`、157s `bootanim` |
+| **拿到帧** | ❌ `renderer->getScreenshot` 恒返回 `res=-1 cap=0`（post-callback 也无帧）→ 无 `frame.ppm/seq` |
+| 子进程稳定性 | ❌ 访客 ~190s 时 **SIGSEGV**，之后父进程留了个僵尸（现已修，见 7.3） |
+
+### 7.3 崩溃定位（本轮新增的诊断能力）
+
+1. **子进程死因可见**：`vm_qemu.c: child_alive()` 现在打印 `WTERMSIG/WEXITSTATUS`，
+   `vm_activity.c` 每秒轮询一次 `vm_qemu_is_running()`。实测输出：
+   ```
+   E VmQemu : 子进程 QEMU 被信号 11（Segmentation fault）终止
+   ```
+2. **崩溃处理器能触发了**：aemu 的 `Thread::maskAllSignals()` 会 `sigfillset` 把 SIGSEGV
+   一起屏蔽，导致 QEMU 自带的崩溃处理器永不触发。给子进程加
+   `LD_PRELOAD=<nativeLibraryDir>/libsigfix.so`（拦截 `pthread_sigmask/sigprocmask`
+   把崩溃信号剔出屏蔽集，源码见 `vm/build-aosp-exp/libsigfix.c`）后即可打出 dump：
+   ```
+   signal=11 si_code=1 addr=0x0 tid=12921
+   pc=0x0 sp=… fp=… lr=0x55a663c028
+   ```
+3. **符号化结果**（注意：运行时地址 → ELF 地址要减去段对齐差 0x4000）：
+   `lr` → `gfxstream::gles1_decoder_context_t::decode()` @ `gles1_dec.cpp`，
+   崩溃前最后一条 GLES1 操作是 **op 1149 = `OP_glShadeModel`**。
+   反汇编该 case 可见调用前**确实有** `cbz x8` 非空校验，所以 `pc=0` 不是 decoder
+   直接调空指针，而是**被调用者（GLES1→GLES2 翻译器）内部**又调了空指针。
+
+### 7.4 下一步
+
+给 `VMHOST_GLES1_CALL` 宏加调用点日志（打印 proc 名字与指针），重编 gfxstream + QEMU 后
+跑一轮，用崩溃前最后一条 `VMHOST_GLES1_CALL` 定位到具体入口与指针值，再结合
+`/proc/<pid>/maps` + `llvm-addr2line` 找到翻译器里那处空调用。
+
+> 复现命令：`engine/scripts/build_gfxstream.sh`（重编静态库）→
+> `engine/scripts/build_qemu_aosp.sh`（重链 QEMU 并安装进 jniLibs）。
+> WSL 里 gfxstream 源码树是 `/root/vmbuild/gfxstream`（不在本仓库内）。
+> 提示：`qemu-stderr.log` 是**追加**写的，复现前先删除，否则会把上一轮的
+> `VMHOST QEMU CRASH` 横幅误当本次现场。

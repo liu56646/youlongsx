@@ -204,7 +204,7 @@ static void add_blk_dev(const char *id, const char *path, bool readonly)
     add_arg("virtio-blk-device,drive=%s", id);
 }
 
-/** 子进程 QEMU 是否还活着（顺带回收）。 */
+/** 子进程 QEMU 是否还活着（顺带回收，并记录退出原因）。 */
 static bool child_alive(void)
 {
     if (s_child_pid <= 0) {
@@ -212,7 +212,21 @@ static bool child_alive(void)
     }
     int status = 0;
     const pid_t r = waitpid(s_child_pid, &status, WNOHANG);
-    if (r == s_child_pid || r < 0) {
+    if (r == s_child_pid) {
+        /* 不记录原因的话，事后只看得到一个僵尸进程和"日志突然停了" */
+        if (WIFSIGNALED(status)) {
+            const int sig = WTERMSIG(status);
+            LOGE("子进程 QEMU 被信号 %d（%s）终止", sig, strsignal(sig));
+        } else if (WIFEXITED(status)) {
+            LOGE("子进程 QEMU 正常退出，code=%d", WEXITSTATUS(status));
+        } else {
+            LOGE("子进程 QEMU 结束，status=0x%x", status);
+        }
+        s_child_pid = -1;
+        return false;
+    }
+    if (r < 0 && errno != EINTR) {
+        LOGW("waitpid(%d) 失败：%s（按已退出处理）", (int) s_child_pid, strerror(errno));
         s_child_pid = -1;
         return false;
     }
@@ -315,6 +329,16 @@ static int spawn_qemu_child(const VmQemuParams *p, const char *exe_path, const c
         }
         /* AOSP QEMU 依赖同目录的 glib/pixman/... ，必须显式给库搜索路径 */
         setenv("LD_LIBRARY_PATH", lib_dir, 1);
+        /* 崩溃诊断：aemu 的 Thread::maskAllSignals() 用 sigfillset 把 SIGSEGV 也屏蔽了，
+           QEMU 自带的崩溃处理器因此永不触发，现场只剩"日志突然中断"。
+           libsigfix.so 拦截 pthread_sigmask/sigprocmask，把崩溃信号从屏蔽集里剔掉。 */
+        {
+            char preload[ARG_CAP];
+            if (snprintf(preload, sizeof(preload), "%s/libsigfix.so", lib_dir) <
+                (int) sizeof(preload) && file_ok(preload)) {
+                setenv("LD_PRELOAD", preload, 1);
+            }
+        }
         /* D1a：把截图回传目录（serial_log 所在目录，即 <dataDir>/logs）传给
            gfxstream glue，它会在该目录轮询 frame.request 并回写 frame.ppm/seq。 */
         if (p->serial_log_path != NULL) {
