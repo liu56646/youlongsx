@@ -22,6 +22,7 @@
 
 #ifdef VM_WITH_QEMU
 #include "vm_qemu.h"
+#include "vm_frame_relay.h"
 #endif
 
 #define TAG "VmEngine"
@@ -175,6 +176,19 @@ static void vm_engine_boot_qemu(void)
 
     if (vm_qemu_start(&params) == 0) {
         LOGI("boot: QEMU 已在后台线程启动");
+        /*
+         * B1 子进程模式：访客帧缓冲留在子进程内存里，本进程的
+         * vmhost_display_* 后端永远是空的。必须打开文件握手回传，
+         * 目录与子进程的 VMHOST_FRAME_DIR 保持一致（<dataDir>/logs）。
+         */
+        if (vm_qemu_is_child_process()) {
+            char frame_dir[PATH_CAP];
+            snprintf(frame_dir, sizeof(frame_dir), "%s/logs", s_data_dir);
+            vm_frame_relay_set_dir(frame_dir);
+            LOGI("boot: 子进程模式，已启用帧回传（目录 %s）", frame_dir);
+        } else {
+            LOGI("boot: 进程内嵌 QEMU，使用进程内显示后端");
+        }
     } else {
         LOGE("boot: QEMU 启动失败（详见上面的参数与文件检查日志）");
     }

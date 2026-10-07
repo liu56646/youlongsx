@@ -11,7 +11,9 @@
 #include "vm_render.h"
 #include "vm_engine.h"
 #include "vm_input.h"
+#ifdef VM_WITH_QEMU
 #include "vm_qemu.h"
+#endif
 
 #define TAG "VmNative"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -65,8 +67,12 @@ static void on_app_cmd(struct android_app* app, int32_t cmd) {
         case APP_CMD_DESTROY:
             /* Activity 正在销毁：让 QEMU 走正常退出路径，
                这样 qemu_cleanup() 才会刷写 userdata 等镜像数据。 */
+#ifdef VM_WITH_QEMU
             LOGI("activity 销毁，停止 QEMU");
             vm_qemu_stop(QEMU_STOP_TIMEOUT_MS);
+#else
+            LOGI("activity 销毁（本次构建未链接 QEMU）");
+#endif
             break;
 
         default:
@@ -99,7 +105,9 @@ void android_main(struct android_app* app) {
 
     /* 兜底停机：Activity 不一定总是走 APP_CMD_DESTROY 这条路
        （例如被系统直接回收），这里再确认一次，vm_qemu_stop 可重复调用。 */
+#ifdef VM_WITH_QEMU
     vm_qemu_stop(QEMU_STOP_TIMEOUT_MS);
+#endif
 
     vm_engine_on_instance_stop(app);
     vm_render_destroy();

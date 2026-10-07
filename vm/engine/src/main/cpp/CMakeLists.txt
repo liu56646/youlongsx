@@ -9,6 +9,9 @@ set(ENGINE_SOURCES
         src/vm_activity.c
         src/vm_render.c
         src/vm_guest_display.c
+        # B1 子进程模式下的帧回传客户端（frame.request / frame.ppm 握手）。
+        # 只依赖 libc，纯骨架构建下同样编入。
+        src/vm_frame_relay.c
         src/vm_input.c
         # NativeActivity 的入口 ANativeActivity_onCreate 由这个胶水层提供，
         # 少了它 NativeActivity 会 dlsym 失败、实例根本起不来。
