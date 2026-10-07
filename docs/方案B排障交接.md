@@ -267,3 +267,72 @@ regs x0=0x1     ← 正是 glBindVertexArray(vao=1) 的参数
 3. 若纯粹是访客没画：等它把 system_server/PMS 起完（此前 B1 里程碑里靠
    `vmhost_amctl` 注入 IActivityController 才让 Watchdog 不杀 system_server，
    本 App 路径没有这个注入，值得补上）。
+
+## 10. 2026-10-07（四）：黑帧根因锁定 —— 「渲染的 buffer ≠ 被 post 的 buffer」
+
+### 10.1 amctl 已验证（结论：无需注入）
+
+真机实测 `console.log`：
+
+```
+[  990.8s] vmhost_amctl: controller registered (attempt#348)
+[ 1249.9s] vmhost_amctl: systemNotResponding -> keep waiting …
+[ 1351.6s] vmhost_amctl: systemNotResponding -> keep waiting …
+[ 1483.5s] vmhost_amctl: systemNotResponding -> keep waiting …
+```
+
+访客镜像（`system.img`）里**本来就有** `/system/etc/init/vmhost_amctl.rc`，
+服务在 81s 拉起、990s 注册成功、三次把 Watchdog 的杀进程改成"继续等"，
+`Entered the Android system server` 只出现 1 次。**访客不是卡死，是 TCG 慢**
+（900s 时 system_server 仍在逐个解析 package）。
+
+> 备用注入路径：`build-aosp-exp/inject_amctl_vendor.{sh}` + `vmhost_amctl_vendor.{sh,rc}`
+> —— 只改 vendor.img（47MB）而不动 system.img（790MB）。踩坑：SDK 的 vendor.img
+> **inode 用满**，既建不了新目录也写不了新文件（`resize2fs` 扩容只加块不加 inode），
+> 需先删掉三个运行期用不到的文件（`/etc/NOTICE.xml.gz`、两个 0 字节的 `fs_config_*`）
+> 腾出 inode。
+
+### 10.2 新增的插桩体系（都在宿主侧，`VMHOST_DIAG` 前缀）
+
+| 落点 | 输出 | 作用 |
+|---|---|---|
+| `gl/gles2_dec/gles2_dec.cpp` | `VMHOST_GLES2_HIST`（每 20 万条累计直方图）、`VMHOST_GLES2_RECENT`（崩溃前最后 64 条）、`VMHOST_GLES2_LOWFREQ`（低频调用参数） | 不逐条打印，避免日志爆炸 |
+| `gl/ColorBufferGl.cpp` blit | `VMHOST_BLIT enter/copy_done/src/draw/exit` | 逐段定位搬运过程 |
+| `gl/ColorBufferGl.cpp` readback | `VMHOST_READBACK … nonzero=N` | 判定黑帧在读侧还是写侧 |
+| `gl/TextureDraw.cpp` | `VMHOST_TEXTUREDRAW program=… link_ok=…` | 排除"GLSL 编译失败"这一历史坑 |
+| `qemu_patches/vmhost_pipe_glue.cpp` | 崩溃处理器补打 `regs x0..x30` + `x0_obj/vptr/slot` 探测 + 回调 `vmhost_gles2_dump_recent()` | 崩溃现场可读；`process_vm_readv` 避免二次崩溃 |
+
+**重要认知**：`VMHOST_GLES1_OP` 那一行打印的是**到达渲染线程的所有包**（不只是 GLES1）。
+所以 `10015/10016/10018/10020/10035` 是 renderControl，`2086/2111` 是 GLES2；
+GLES1 是 1024–1317 段（1149=glShadeModel、1190=glDrawTexiOES…）。
+
+### 10.3 实测结论
+
+```
+VMHOST_TEXTUREDRAW program=3 vs=1 fs=2 link_ok=1 err=0x0      ← 搬运用的 program 正常
+VMHOST_BLIT enter fastBlit=0 pendingErr=0x0 clientVer=1        ← GLES1 客户端
+VMHOST_BLIT copy_done m_blitTex=39 err=0x502
+VMHOST_BLIT src m_blitTex=39 fboStatus=0x8cd5 nonzero=64/256    ← 源有内容、FBO 完整
+VMHOST_BLIT draw m_tex=38 m_blitTex=39 fbo=4 err=0x0
+VMHOST_READBACK tex=33 1080x1920 sampled=129600 nonzero=0       ← 但读回的是 0
+```
+
+- **读回侧没问题**：`bindFbo` 未失败、`glReadPixels` 无错、`nonzero=0` → 被 post 的
+  ColorBuffer **纹理本身就是空的**。
+- **写入侧的上游也没问题**：源纹理 `m_blitTex` 有内容（64/256），FBO COMPLETE，
+  TextureDraw 的 program 链接成功、draw 无 GL 错。
+- **根因**：blit 搬运的目标是 host tex **25/38/42/26/39/43**，而**被 post 并读回的是
+  33/46** —— 两组完全不相交。即 **访客渲染的 buffer ≠ HWC post（我们截图）的 buffer**，
+  后者从未被搬运过，所以恒为黑。
+- 附带定位：每帧一次的 `0x502(INVALID_OPERATION)` 来自 **blit 作用域末尾
+  `RecursiveScopedContextBind` 的析构**（恢复绑定到已删除对象），
+  `glViewport` 恢复与 `unbindFbo()` 本身都干净（各 2332 次 err=0x0）。与画面无关。
+
+### 10.4 下一步
+
+1. **修 LOWFREQ 过滤**：`len>=20` 把 rc 包（len 12/16）滤掉了 → 改成按长度逐级打印
+   `a0/a1/a2`，拿到 `rcSetWindowColorBuffer / rcFlushWindowColorBuffer / rcFBPost` 的 handle；
+2. **在 blit 的 draw 之后采样 `m_tex`**（与源对照），确认搬运目标是否真的被写进内容；
+3. **在宿主 `FrameBuffer::post` 打点**（posted CB 的 handle + host tex），把
+   「访客 handle ↔ host tex ↔ 是否被 blit」三者对上 —— 这是修"渲染/post 两块 buffer 不一致"
+   的前提。

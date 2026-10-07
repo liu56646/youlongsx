@@ -1,0 +1,35 @@
+# VMHost · 方案 2：注册 IActivityController，抑制 Watchdog 的 SIGKILL（vendor 版）。
+#
+# 为什么需要：TCG 全虚拟化下 system_server 主线程偶发 >60s 阻塞，而
+# services.jar 里 Watchdog.java 的 DEFAULT_TIMEOUT 硬编码 60s，判定 OVERDUE 后
+# 直接 Process.killProcess(myPid()) -> zygote 自杀重启 -> sys.boot_completed 反复丢失。
+# Watchdog.run() 里唯一能让它「只回调不杀」的口子就是 mController。
+#
+# 以 root(uid 0) 运行：ActivityTaskManagerService.setActivityController 强制
+# android.Manifest.permission.SET_ACTIVITY_WATCHER（signature 级），uid 0 直接 GRANTED。
+# 程序自身会轮询 "activity" 服务并周期性重注册，所以早启动没关系。
+#
+# seclabel 说明：新建的文件是 u:object_r:unlabeled:s0，init 会因「标签错误/无域转换」
+# 拒绝启动，显式指定一个已定义的域来绕过。选 incidentd 的依据（platform sepolicy）：
+#   (allow incidentd system_server_service (service_manager (find)))
+#   (allow incidentd system_server (binder (call transfer)))
+#   (allow system_server incidentd (binder (call transfer)))
+service vmhost_amctl /system/bin/sh /vendor/bin/vmhost_amctl.sh
+    class late_start
+    user root
+    group root system
+    seclabel u:r:incidentd:s0
+    stdio_to_kmsg
+
+# 额外保险：本 guest 以 androidboot.selinux=permissive 启动，但若 init 实际落到
+# enforcing（audit=0 会把拒绝藏起来），这里尽力再置一次；失败只是多一行日志。
+on early-init
+    write /sys/fs/selinux/enforce 0
+
+on post-fs
+    write /sys/fs/selinux/enforce 0
+
+# 尽早拉起：system_server 比 zygote 晚，且每次重启都会丢弃控制器，
+# 但程序会持续重注册自愈，所以只要进程活着即可。
+on zygote-start
+    start vmhost_amctl
