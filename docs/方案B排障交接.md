@@ -485,3 +485,44 @@ frame.ppm：非零 R 采样 = 0，maxR = 0
 > 注：`VMHOST_HACK_POST_CB` 那套"post 时改用 window surface CB"的兜底，本轮已证明
 > 不是修法；在 `patch_vmhost_diag.py` 里**默认不启用**（脚本侧已加开关），
 > 当前 WSL 源码树里仍是打开状态（下次干净重建时不带 `VMHOST_HACK_POST_CB=1` 即恢复）。
+
+## 14. 2026-10-07（八）：访客在画，但**几乎没上传过纹理**
+
+### 14.1 插桩调整
+
+- `VMHOST_GLES2_LOWFREQ` 支持按包长打印**最多 7 个参数**（`glTexImage2D` 的宽高在
+  a3/a4，只打 3 个看不到尺寸），并把 `glTexImage2D(2153)` / `glTexSubImage2D(2158)`
+  加入低频名单；
+- 直方图 dump 阈值 `200000 → 20000` 条（原来整轮实验都到不了阈值，等于没有输出）。
+
+### 14.2 实测（本次运行约 6 分钟）
+
+```
+GLES1 调用统计：
+  glDrawTexiOES ×5799    glBindTexture ×3878    glDisable ×3868    glEnable ×3867
+  glClear      ×1934     glScissor     ×1933    glTexImage2D ×2    glShadeModel ×1
+
+GLES2 直方图（累计 2 万包）：
+  glTexImage2D n=2 → a0=0xde1(GL_TEXTURE_2D) a2=0x1906(GL_ALPHA) a3=0x80(128) a4=0x1
+  glUseProgram n=48    glUniformMatrix4fv n=48    glEnableVertexAttribArray n=48
+  glDrawArrays / glDrawElements：**n=0（完全没有绘制）**
+  rcBindTexture n=2743   rcSetWindowColorBuffer n=1374
+  rcFlushWindowColorBuffer n=1372   rcFBPost n=1371
+```
+
+**结论**：访客**确实在绘制**（GLES1 侧 5799 次 `glDrawTexiOES`、1934 次 `glClear`），
+但它**几乎没上传过纹理数据** —— 整轮只有 2 张 128×1 的 `GL_ALPHA` 贴图。
+`glDrawTexiOES` 是"把纹理画到 quadrilateral 上"，采样的纹理是空的，合成结果自然全黑。
+
+也就是说：既不是"没画"，也不是"画了没传过来"，而是**画的时候用的纹理是空的**。
+
+### 14.3 下一步（两个互斥的可能）
+
+1. **图层 buffer 本身是黑的**（访客侧各 App/合成源没画出东西）—— 在本阶段访客还在
+   system_server 启动期（本次 369s 仍在 `CompatConfig`），可能确实没有可见内容；
+2. **纹理数据的上传路径断了** —— 例如大贴图的 `glTexImage2D` 走的是共享内存/ASG 路径，
+   而不是内联在 pipe 包里，导致我们只看到那两张调色板贴图。
+
+建议的探针：**在 `rcBindTexture(cb)` 处采样被绑定那块 CB 的 RGB**（`VMHOST_BLIT src`
+那套 8x8 采样已有现成代码）。若被绑定的图层 CB 里有内容 → 说明"内容在、合成没生效"；
+若也是 0 → 说明访客侧根本没有产出内容（先等它把系统起完再判）。

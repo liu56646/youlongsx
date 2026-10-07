@@ -64,6 +64,8 @@ static bool vmhost_gles2_lowfreq(uint32_t opcode) {
         case 2095:  /* glFramebufferTexture2D */
         case 2111:  /* glGetIntegerv */
         case 2137:  /* glLinkProgram */
+        case 2153:  /* glTexImage2D   —— 看尺寸/格式，判断访客有没有真上传纹理 */
+        case 2158:  /* glTexSubImage2D */
         case 2178:  /* glUseProgram */
         case 2189:  /* glViewport */
         case 10015: /* rcSetWindowColorBuffer */
@@ -87,22 +89,21 @@ static void vmhost_gles2_note(uint32_t opcode, uint32_t len, const unsigned char
     g_total++;
 
     if (vmhost_gles2_lowfreq(opcode)) {
-        /* 按包长逐级打印：rc 包的 len 只有 12/16，不能只看 len>=20 */
-        char args[80] = {0};
-        int n = snprintf(args, sizeof(args), "a0=0x%x",
-                         len >= 12 ? *(const uint32_t*)(p + 8) : 0u);
-        if (len >= 16) {
-            n += snprintf(args + n, sizeof(args) - n, " a1=0x%x",
-                          *(const uint32_t*)(p + 12));
+        /* 按包长逐级打印参数（最多 7 个）：rc 包的 len 只有 12/16；
+           glTexImage2D 要看 a3/a4 才是宽高，所以不能只打 3 个。 */
+        char args[160] = {0};
+        int n = 0;
+        for (int i = 0; i < 7; i++) {
+            if (len < (uint32_t)(12 + 4 * i)) {
+                break;
+            }
+            n += snprintf(args + n, sizeof(args) - n, " a%d=0x%x",
+                          i, *(const uint32_t*)(p + 8 + 4 * i));
         }
-        if (len >= 20) {
-            (void)snprintf(args + n, sizeof(args) - n, " a2=0x%x",
-                           *(const uint32_t*)(p + 16));
-        }
-        fprintf(stderr, "VMHOST_GLES2_LOWFREQ op=%u len=%u %s\n", opcode, len, args);
+        fprintf(stderr, "VMHOST_GLES2_LOWFREQ op=%u len=%u%s\n", opcode, len, args);
     }
 
-    if (g_total - g_lastDumpTotal >= 200000) {
+    if (g_total - g_lastDumpTotal >= 20000) {
         g_lastDumpTotal = g_total;
         fprintf(stderr, "VMHOST_GLES2_HIST total=%llu\n",
                 (unsigned long long) g_total);
