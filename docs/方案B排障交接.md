@@ -151,3 +151,70 @@ QEMU 为自编 AOSP qemu 2.12（`/dev/vexp/qemu-system-aarch64`）。
 > WSL 里 gfxstream 源码树是 `/root/vmbuild/gfxstream`（不在本仓库内）。
 > 提示：`qemu-stderr.log` 是**追加**写的，复现前先删除，否则会把上一轮的
 > `VMHOST QEMU CRASH` 横幅误当本次现场。
+
+## 8. 2026-10-07（续）：崩溃根因链已打通到第三层
+
+### 8.1 诊断能力（本轮新增，已实机验证）
+
+- **崩溃处理器打全寄存器**（`vmhost_pipe_glue.cpp`）：新增 `regs x0..x30` 与
+  `x0_obj / vptr / slot0 / slot1` 探测。探测走 `process_vm_readv`，
+  坏指针只报错、不会在处理 SIGSEGV 时二次崩溃。
+- **`LD_PRELOAD=libsigfix.so`**：解除 aemu `maskAllSignals()` 对 SIGSEGV 的屏蔽，
+  否则 QEMU 自带崩溃处理器永远不触发（子进程只会静默消失）。
+- **子进程死因可见**：`vm_qemu.c: child_alive()` 打印 `WTERMSIG/WEXITSTATUS`。
+- 符号化换算：**ELF 地址 = 运行时地址 − 第一个 PT_LOAD 段的运行时基址**
+  （段对齐差 0x4000；用 `/proc/self/maps` 里的第一行 r--p 起始地址当基址）。
+
+### 8.2 第一层：GL1 直通空表（已修）
+
+访客第一条固定管线命令 `glShadeModel` 就崩，`pc=0`。原因链：
+
+```
+GLEScmContext::shadeModel()  →  dispatcher().glShadeModel()   // GLEScontext.h:424 的静态 s_glDispatch
+   ↑ 仅当 m_coreProfileEngine 为 NULL 时才走这条
+GLEScmContext 构造：if (isCoreProfile()) ... else if (isGles2Gles()) ...  // 两者都不满足 → engine 为 NULL
+isGles2Gles() ← initGLESx(EglGlobalInfo::isEgl2Egl())   // EglImp.cpp:112
+sEgl2egl ← getenv("ANDROID_EGL_ON_EGL") == "1"          // opengles.cpp:120
+```
+
+我们的宿主正是"跑在系统 EGL/GLES 之上"（手机只有 GLES 3.2，没有 GL1），但
+`ANDROID_EGL_ON_EGL` 没设 → 翻译器直通 host 的 GL1 函数表，而那张表在 GLES2-only
+宿主上全是 NULL → `pc=0`。
+
+**修复**：`vmhost_gfx_glue.cpp` 在 `android_setOpenglesEmulation()` 之前
+`setenv("ANDROID_EGL_ON_EGL", "1", 1)`。
+
+### 8.3 第二层：CoreProfileEngine 里的 ES3 空指针（当前卡点）
+
+打开 egl2egl 后翻译器确实改走了 `CoreProfileEngine`，访客也从 ~190s 撑到 ~253s，
+但崩溃点转移：
+
+```
+pc=0x0  lr=<CoreProfileEngine::getGeometryDrawState()+…>
+regs x0=0x1     ← 正是 glBindVertexArray(vao=1) 的参数
+```
+
+`CoreProfileEngine.cpp:345`：`gl.glBindVertexArray(m_geometryDrawState.vao);`
+（`gl` 即静态 `s_glDispatch`）→ **`glBindVertexArray` 在表里是 NULL**。
+`glGenVertexArrays/glBindVertexArray` 是 ES3 入口，而这张表由
+`GLEScmContext::initGlobal()` 的
+`s_glDispatch.dispatchFuncs(s_maxGlesVersion, eglIface->eglGetGlLibrary(), eglIface->getProcAddress)`
+填充 —— 看起来只按 `s_maxGlesVersion` 解析到 ES2 为止，ES3 项留空。
+
+**下一步（二选一，倾向后者）**：
+1. 让 `s_maxGlesVersion` 体现宿主真实版本（GLES 3.2），使 ES3 入口被解析；
+2. 更稳妥：在 `dispatchFuncs()` 完成后把**仍为 NULL 的槽位填成 no-op 桩**
+   （与 `gles1_dec.cpp` 里 `gles1_unimplemented` 同一思路），
+   彻底消灭"宿主缺某个 GL 入口 → pc=0"这一整类崩溃；有返回值的入口需
+   各自给一个安全默认值（0 / NULL），否则调用方可能拿到垃圾值。
+
+### 8.4 顺带修掉的其它问题
+
+- `vmhost_gfx_glue.cpp`：PPM 输出原为逐像素 `fputc`（720×1280 一帧 276 万次调用），
+  改为先在内存打包 RGB、再一次性 `fwrite`（两处写 PPM 的地方都改了）。
+- `vm_frame_relay.c`：新增 `REQUEST_PENDING_TIMEOUT_MS`，避免"子进程崩在删
+  frame.request 之前 → pending 标志永不复位 → 再不发新请求"的静默卡死；
+  PPM 原文缓冲改为复用，不再每帧 malloc/free 两三 MB。
+- `engine/build.gradle.kts`：`keepDebugSymbols += "**/libqemu_exec.so"` **实测不需要**
+  —— strip 后的可执行体真机照常 exec 成功，去掉后 APK 从 ~120MB 降到 **29.2MB**。
+- `memoryMb/cores` 已从 `VmConfig` 读取（见 §7.1）。

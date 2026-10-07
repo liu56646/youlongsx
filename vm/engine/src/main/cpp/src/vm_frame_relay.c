@@ -40,11 +40,23 @@
  */
 #define DECODE_RETRY_MAX 3
 
+/*
+ * 一个已发出但没被 QEMU 侧删掉的 frame.request 最多算"在途"多久。
+ *
+ * 为什么需要：QEMU 侧只在截图线程跑完一轮后才 unlink 请求文件。子进程若在
+ * 那之前就崩了，这个文件会永远躺在磁盘上，s_request_pending 不复位 ——
+ * 之后即使实例仍在跑（或子进程被重新拉起），也**再也不会发出新请求**，
+ * 回传通道静默卡死。超时后当成陈旧请求丢弃，重新发一次；QEMU 侧对重复
+ * 请求是幂等的（读到就截图、写完就删）。
+ */
+#define REQUEST_PENDING_TIMEOUT_MS 2000
+
 #define DIR_CAP 512
 
 static char     s_dir[DIR_CAP];
 static uint64_t s_last_seq;
 static bool     s_request_pending;
+static uint64_t s_request_sent_ms;   /* 在途请求的发出时刻（判超时用） */
 static uint64_t s_next_request_ms;
 static bool     s_warned_short_ppm;
 
@@ -57,6 +69,10 @@ static uint8_t *s_pixels;
 static size_t   s_cap;
 static int      s_width;
 static int      s_height;
+
+/* 读进来的 PPM 原文（复用，避免每帧 malloc/free 两三 MB） */
+static uint8_t *s_ppm_buf;
+static size_t   s_ppm_cap;
 
 /* ------------------------------------------------------------------ */
 /* 小工具                                                              */
@@ -247,17 +263,20 @@ static bool load_ppm(void)
     }
     rewind(fp);
 
-    uint8_t *buf = (uint8_t *) malloc((size_t) size);
-    if (buf == NULL) {
-        fclose(fp);
-        return false;
+    const size_t need = (size_t) size;
+    if (s_ppm_cap < need) {
+        uint8_t *fresh = (uint8_t *) realloc(s_ppm_buf, need);
+        if (fresh == NULL) {
+            fclose(fp);
+            return false;
+        }
+        s_ppm_buf = fresh;
+        s_ppm_cap = need;
     }
-    const size_t got = fread(buf, 1, (size_t) size, fp);
+    const size_t got = fread(s_ppm_buf, 1, need, fp);
     fclose(fp);
 
-    const bool ok = (got == (size_t) size) && ppm_decode_to_rgba(buf, got);
-    free(buf);
-    return ok;
+    return got == need && ppm_decode_to_rgba(s_ppm_buf, got);
 }
 
 /* ------------------------------------------------------------------ */
@@ -274,15 +293,18 @@ static void maybe_request(int req_w, int req_h)
         return;
     }
 
-    /* 上一次的请求还在（QEMU 侧没删）就继续等，别堆文件 */
+    const uint64_t now = now_ms();
+
+    /* 上一次的请求还在（QEMU 侧还没删）就继续等，别堆文件；
+       但超过 REQUEST_PENDING_TIMEOUT_MS 就当它陈旧，重新发（见宏注释）。 */
     if (s_request_pending) {
-        if (access(req, F_OK) == 0) {
+        if (access(req, F_OK) == 0 &&
+            (now - s_request_sent_ms) < REQUEST_PENDING_TIMEOUT_MS) {
             return;
         }
         s_request_pending = false;
     }
 
-    const uint64_t now = now_ms();
     if (now < s_next_request_ms) {
         return;
     }
@@ -305,6 +327,7 @@ static void maybe_request(int req_w, int req_h)
         return;
     }
     s_request_pending = true;
+    s_request_sent_ms = now;
 }
 
 /* ------------------------------------------------------------------ */

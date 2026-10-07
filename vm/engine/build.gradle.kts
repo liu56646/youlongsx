@@ -24,10 +24,10 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true
-            // libqemu_exec.so 实际是 QEMU 的可执行体（PIE），不是共享库。
-            // AGP 默认会对 jniLibs 里的 .so 跑 NDK 的 llvm-strip，
-            // 对可执行体做 strip 有破坏风险，这里显式保留符号。
-            keepDebugSymbols += "**/libqemu_exec.so"
+            // 注：libqemu_exec.so 是 QEMU 的可执行体（PIE），不是共享库。
+            // 曾经加过 keepDebugSymbols += "**/libqemu_exec.so" 以防 AGP 的
+            // llvm-strip 破坏它，但一直没在真机验证过（只是让 APK 变大几十 MB）。
+            // 现改为实测：能跑就不保留符号（见 docs/方案B排障交接.md §8）。
         }
     }
 }

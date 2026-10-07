@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 #include <ucontext.h>
 #include <unistd.h>
 
@@ -760,6 +761,22 @@ static void vmhost_crash_pc(uint64_t v) {
     }
 }
 
+/*
+ * 崩溃处理器里读内存：必须走 process_vm_readv。
+ * 直接解引用一个坏指针会在处理 SIGSEGV 的过程中再触发一次 SIGSEGV ——
+ * 那时该信号已被屏蔽，内核直接打死进程，连已写好的 dump 都可能丢。
+ * process_vm_readv 对坏地址只返回 -1/EFAULT。
+ */
+static bool vmhost_crash_peek(uint64_t addr, uint64_t *out) {
+    if (addr == 0 || addr < 4096 || (addr & 0x7) != 0) {
+        return false;
+    }
+    struct iovec local = { out, sizeof *out };
+    struct iovec remote = { (void *)(uintptr_t)addr, sizeof *out };
+    const ssize_t n = syscall(SYS_process_vm_readv, getpid(), &local, 1, &remote, 1, 0);
+    return n == (ssize_t)sizeof *out;
+}
+
 static void vmhost_crash_handler(int sig, siginfo_t *si, void *ucp) {
     ucontext_t *uc = (ucontext_t *)ucp;
     char buf[256];
@@ -783,6 +800,40 @@ static void vmhost_crash_handler(int sig, siginfo_t *si, void *ucp) {
              (unsigned long long)pc, (unsigned long long)sp,
              (unsigned long long)fp, (unsigned long long)lr);
     vmhost_crash_w(buf);
+
+    /*
+     * 完整寄存器：pc=0 这类"跳到 0"的崩溃，光有 pc/lr 只能定位到调用点，
+     * 要靠 x0..x30 才能判断是哪个对象/哪个参数出的问题。
+     */
+#if defined(__aarch64__)
+    if (uc) {
+        for (int i = 0; i < 31; i++) {
+            snprintf(buf, sizeof buf, "regs x%d=0x%llx\n", i,
+                     (unsigned long long)uc->uc_mcontext.regs[i]);
+            vmhost_crash_w(buf);
+        }
+        /*
+         * 典型现场：x0 = this，调用其虚函数时 vtable 槽位为 0。
+         * 把对象指针、vptr 与前两个槽位一起打出来，离线就能符号化出类名。
+         */
+        {
+            const uint64_t obj = (uint64_t)uc->uc_mcontext.regs[0];
+            uint64_t vptr = 0, slot0 = 0, slot1 = 0;
+            snprintf(buf, sizeof buf, "x0_obj=0x%llx", (unsigned long long)obj);
+            vmhost_crash_w(buf);
+            if (vmhost_crash_peek(obj, &vptr) && vmhost_crash_peek(vptr, &slot0) &&
+                vmhost_crash_peek(vptr + 8, &slot1)) {
+                snprintf(buf, sizeof buf,
+                         " vptr=0x%llx slot0=0x%llx slot1=0x%llx\n",
+                         (unsigned long long)vptr, (unsigned long long)slot0,
+                         (unsigned long long)slot1);
+            } else {
+                snprintf(buf, sizeof buf, " vptr=<不可读>\n");
+            }
+            vmhost_crash_w(buf);
+        }
+    }
+#endif
 
     vmhost_crash_w("--- backtrace (fp walk) ---\n");
     vmhost_crash_pc(pc);

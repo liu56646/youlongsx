@@ -218,6 +218,19 @@ extern "C" int vmhost_gfx_init(void) {
     }
 
     // 3. 注入 RenderLib
+    //
+    // 打开 egl2egl：我们的宿主就是"跑在系统 EGL/GLES 之上"的场景（手机只有
+    // GLES 3.2，没有 GL1）。gl-host-common/opengles.cpp 正是用这个环境变量填
+    // sEgl2egl，再经 EglImp.cpp 的 initGLESx(EglGlobalInfo::isEgl2Egl()) 传到
+    // GLES1 翻译器：
+    //   isGles2Gles() == true → GLEScmContext 建 CoreProfileEngine(gles2gles)，
+    //   在 GLES2 上用着色器模拟固定管线；
+    //   == false → 直通 host 的 GL1 函数表，而那张表在 GLES2-only 宿主上
+    //   （glShadeModel / glMatrixMode 等 GL1 专用项）全是 NULL
+    //   → 访客一发固定管线命令就 pc=0 崩溃（实测 glShadeModel 首崩）。
+    // 必须在 android_setOpenglesEmulation() 之前设，它在那里读这个变量。
+    setenv("ANDROID_EGL_ON_EGL", "1", 1);
+
     sVmHostRenderLib = new gfxstream::RenderLibImpl();
     android_setOpenglesEmulation(sVmHostRenderLib, nullptr, nullptr);
 
@@ -356,14 +369,23 @@ static int vmhost_gfx_write_latest_ppm(const char* path) {
         return -1;
     }
     fprintf(fp, "P6\n%d %d\n255\n", s_latest_w, s_latest_h);
-    const uint8_t* p = s_latest_pixels.data();
-    const size_t row = (size_t)s_latest_w * 4u;
-    for (int y = 0; y < s_latest_h; y++) {
-        const uint8_t* r = p + (size_t)y * row;
-        for (int x = 0; x < s_latest_w; x++) {
-            fputc(r[x * 4 + 0], fp);
-            fputc(r[x * 4 + 1], fp);
-            fputc(r[x * 4 + 2], fp);
+    /*
+     * RGBA -> RGB 先在内存里打包，再一次 fwrite。
+     * 原来逐像素 fputc，720x1280 一帧要 276 万次调用（+无缓冲 IO），
+     * 单帧可达上百毫秒 —— 这条是截图线程的热路径。
+     */
+    {
+        const size_t px = (size_t)s_latest_w * (size_t)s_latest_h;
+        std::vector<uint8_t> rgb(px * 3u);
+        for (size_t i = 0; i < px; i++) {
+            rgb[i * 3u + 0] = s_latest_pixels[i * 4u + 0];
+            rgb[i * 3u + 1] = s_latest_pixels[i * 4u + 1];
+            rgb[i * 3u + 2] = s_latest_pixels[i * 4u + 2];
+        }
+        if (fwrite(rgb.data(), 1, rgb.size(), fp) != rgb.size()) {
+            fclose(fp);
+            unlink(tmp);
+            return -1;
         }
     }
     fclose(fp);
@@ -435,21 +457,23 @@ extern "C" int vmhost_gfx_screenshot_to_file(const char* path, int max_w, int ma
     // 之前是 fwrite(pixels.data(), 1, cap, fp)，把 4 字节/像素的 RGBA 直接
     // 倒进了声明为 3 字节/像素的 P6 文件 —— 消费端（App 侧帧回传）读到的
     // 就是错位的花屏数据。
-    size_t written = 0;
-    for (size_t i = 0; i < px; i++) {
-        const uint8_t* s = pixels.data() + i * 4u;
-        if (fputc(s[0], fp) == EOF || fputc(s[1], fp) == EOF ||
-            fputc(s[2], fp) == EOF) {
-            break;
+    // 另外不要逐像素 fputc：先在内存里打包好，再一次 fwrite。
+    {
+        std::vector<uint8_t> rgb(px * 3u);
+        for (size_t i = 0; i < px; i++) {
+            rgb[i * 3u + 0] = pixels[i * 4u + 0];
+            rgb[i * 3u + 1] = pixels[i * 4u + 1];
+            rgb[i * 3u + 2] = pixels[i * 4u + 2];
         }
-        written += 3;
+        const size_t written = fwrite(rgb.data(), 1, rgb.size(), fp);
+        if (written != rgb.size()) {
+            vmhost_gfx_log("screenshot: 写入不完整 %zu/%zu", written, rgb.size());
+            fclose(fp);
+            unlink(tmp);
+            return -1;
+        }
     }
     fclose(fp);
-    if (written != px * 3u) {
-        vmhost_gfx_log("screenshot: 写入不完整 %zu/%zu", written, px * 3u);
-        unlink(tmp);
-        return -1;
-    }
     if (rename(tmp, path) != 0) {
         unlink(tmp);
         return -1;
