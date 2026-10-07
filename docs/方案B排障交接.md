@@ -387,3 +387,56 @@ handle **0x8 / 0xb**（host tex **33 / 46**）——这两块**从未被渲染�
   blit(enter/copy_done/src/dst/after_viewport/after_unbind) 与 readback 内容校验、
   TextureDraw 链接结果、`FrameBuffer::post` 的 `handle ↔ host tex` 打点
 - 实测幂等：首次应用 2 条、跳过 8 条；再跑一次 0 应用 / 10 跳过
+
+## 12. 2026-10-07（六）：第 3 步验证 —— 内容确实"存在过"，但读回时已不在
+
+### 12.1 语义澄清（第 1、2 步）
+
+- `rcSetWindowColorBuffer(a0, a1)` / `rcFlushWindowColorBuffer(a0)` 的 **a0 是
+  window surface 句柄，不是 display**（`RenderControl.cpp:929/874` 的形参名即
+  `windowSurface`）。我们的日志里 a0=0x6，即"窗口 surface 6"。
+- `rcFlushWindowColorBuffer(6)` → `getEmulatedEglWindowSurfaceColorBufferHandle(6)`
+  → `flushEmulatedEglWindowSurfaceColorBuffer(6)` → `flushColorBufferFromGl(cb)`，
+  也就是把宿主窗口 surface 的内容搬进 **该窗口绑定的 CB**（实测是 0x5 / 0x9 / 0xa，
+  即 host tex 25 / 38 / 42）——这正是 `VMHOST_BLIT` 那段日志的来源。
+- 而 guest 随后 `rcFBPost(0x8 / 0xb)`（host tex 33 / 46），与上面那组**不同**。
+
+### 12.2 验证补丁（VMHOST_HACK，默认不启用）
+
+`FrameBuffer` 里加一个 `m_lastFlushedWindowCb`：flush window surface 时记住那块 CB，
+`postImpl` 的 display-0 回调改用它作为像素源。
+
+- 开关：`VMHOST_HACK_POST_CB=1` 时由 `patch_vmhost_diag.py` 应用（默认不应用，
+  避免新克隆默认带上实验行为）；实测默认 10 条、开启 13 条，均幂等。
+
+### 12.3 结果：hack 生效，但画面**仍然全黑**
+
+```
+VMHOST_POST     handle=0x8 cbHndl=0x8 tex=33      ← guest 仍 post 8/b
+VMHOST_READBACK tex=25 … nonzero=0                ← 但这次读的是 window surface CB 了
+VMHOST_READBACK tex=38 … nonzero=0
+VMHOST_READBACK tex=46 … nonzero=0
+frame.ppm：sampled=117374 nonzero=0 mean=0 max=0   ← 整帧仍全黑
+```
+
+对比上一轮：**同一批纹理（25/38/42）在 blit 之后立刻采样是 64/256 非零**，
+而到 post 回调读回时却是 0。也就是说：**内容确实写进去过，但读回时已经不在**。
+
+两个待排除的方向：
+1. **读错了纹理**：`readback()` 用 `bindFbo(&m_fbo, m_tex, m_needFboReattach)`，
+   当 `m_needFboReattach == false` 时会**复用已存在的 FBO 而不重新 attach** ——
+   如果这个 FBO 上挂的是别的纹理，就会读到别人的内容（现象正是"读到 0"）。
+2. **内容被覆盖**：该 CB 同时是 guest 的渲染目标（window surface），
+   下一帧的清屏/绘制可能把上一帧内容抹掉，与 post 的时序错开。
+
+另外顺带修正一个**测量口径**：readback 的采样步长是每 64 字节（≈每 16 像素），
+对"小面积内容"会漏检；但 `frame.ppm` 的整帧稀疏采样（117k 点，mean=0、max=0）
+足以判定整帧确实是黑的。
+
+### 12.4 下一步
+
+1. `readback()` 里打印 `m_fbo / m_needFboReattach`，并在 `bindFbo` 的
+   「复用」与「重新 attach」两条分支各打一行 → 排除"读错纹理"；
+2. 把 readback 的统计从"抽样"改成"整块求 max/非零计数"（一次性、只打一行）；
+3. 在 `rcFlushWindowColorBuffer` **刚结束**时也采样同一块 CB（与 post 前对照），
+   确认内容是在两者之间消失的。

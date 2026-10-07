@@ -366,6 +366,69 @@ edit("host/FrameBuffer.cpp", "VMHOST_POST handle=",
 
 
 # ----------------------------------------------------------------------------
+# 5) 验证性兜底（**默认不启用**，需 VMHOST_HACK_POST_CB=1）：被 post 的 CB 与渲染的
+#    window surface CB 不是同一块（见 docs/方案B排障交接.md §11：guest flush 进
+#    5/9/a，却 post 8/b）。这是验证假设用的 hack，不是最终修法。
+# ----------------------------------------------------------------------------
+if os.environ.get("VMHOST_HACK_POST_CB") == "1":
+    edit("host/FrameBuffer.h", "HandleType m_lastFlushedWindowCb",
+     [("""    HandleType m_lastPostedColorBuffer = 0;
+""",
+       """    HandleType m_lastPostedColorBuffer = 0;
+
+    /* VMHOST_HACK: 最近一次 flush 过的 window surface CB —— 用于绕过"post 的 handle
+       与渲染的 window surface CB 不是同一块"（见 FrameBuffer::postImpl 的说明）。 */
+    HandleType m_lastFlushedWindowCb = 0;
+""")],
+     note="记录最近 flush 的 window CB（成员声明）")
+
+    edit("host/FrameBuffer.cpp", "记住刚刚 flush 的这块 CB",
+     [("""    EmulatedEglWindowSurface* surface = it->second.first.get();
+    surface->flushColorBuffer();
+
+    return true;
+}""",
+       """    EmulatedEglWindowSurface* surface = it->second.first.get();
+    surface->flushColorBuffer();
+
+    /* VMHOST_HACK: 记住刚刚 flush 的这块 CB（post 时作为像素源的兜底） */
+    {
+        auto cbIt = m_EmulatedEglWindowSurfaceToColorBuffer.find(p_surface);
+        if (cbIt != m_EmulatedEglWindowSurfaceToColorBuffer.end() &&
+            cbIt->second != 0) {
+            m_lastFlushedWindowCb = cbIt->second;
+        }
+    }
+
+    return true;
+}""")],
+     note="flush 时记录 window CB")
+
+    edit("host/FrameBuffer.cpp", "优先用最近 flush",
+     [("""    for (auto& iter : m_onPost) {
+        ColorBufferPtr cb;
+        if (iter.first == 0) {
+            cb = colorBuffer;
+        } else {""",
+       """    for (auto& iter : m_onPost) {
+        ColorBufferPtr cb;
+        if (iter.first == 0) {
+            cb = colorBuffer;
+            /* VMHOST_HACK: guest 的 rcFBPost(handle) 与它实际渲染的 window surface
+               CB 不是同一块（实测：渲染结果 flush 进 5/9/a，post 的却是 8/b，
+               后者恒空 → 画面全黑）。这里在被 post 的 CB 之外，优先用最近 flush
+               过的 window surface CB 作为像素源，用于验证"就是这一处错配"。 */
+            if (m_lastFlushedWindowCb != 0 && m_lastFlushedWindowCb != p_colorbuffer) {
+                ColorBufferPtr alt = findColorBuffer(m_lastFlushedWindowCb);
+                if (alt) {
+                    cb = alt;
+                }
+            }
+        } else {""")],
+     note="post 时优先用 window CB")
+
+
+# ----------------------------------------------------------------------------
 # 执行
 # ----------------------------------------------------------------------------
 def main():
