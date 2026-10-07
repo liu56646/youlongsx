@@ -777,6 +777,12 @@ static bool vmhost_crash_peek(uint64_t addr, uint64_t *out) {
     return n == (ssize_t)sizeof *out;
 }
 
+/*
+ * VMHOST_DIAG: 由 gles2_dec.cpp 提供，打印崩溃前最后 64 条 GLES2 命令。
+ * 用弱符号：万一分发库/链接顺序里没有这个符号，也不会导致链接失败。
+ */
+extern "C" void vmhost_gles2_dump_recent(void) __attribute__((weak));
+
 static void vmhost_crash_handler(int sig, siginfo_t *si, void *ucp) {
     ucontext_t *uc = (ucontext_t *)ucp;
     char buf[256];
@@ -856,6 +862,11 @@ static void vmhost_crash_handler(int sig, siginfo_t *si, void *ucp) {
         }
     }
     vmhost_crash_w("--- end backtrace ---\n");
+
+    /* VMHOST_DIAG: 崩溃前最后 64 条 GLES2 命令 —— 就是把这串调用打崩的驱动 */
+    if (vmhost_gles2_dump_recent) {
+        vmhost_gles2_dump_recent();
+    }
 
     {
         int mf = open("/proc/self/maps", O_RDONLY);
