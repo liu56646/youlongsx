@@ -440,3 +440,48 @@ frame.ppm：sampled=117374 nonzero=0 mean=0 max=0   ← 整帧仍全黑
 2. 把 readback 的统计从"抽样"改成"整块求 max/非零计数"（一次性、只打一行）；
 3. 在 `rcFlushWindowColorBuffer` **刚结束**时也采样同一块 CB（与 post 前对照），
    确认内容是在两者之间消失的。
+
+## 13. 2026-10-07（七）：**测量口径修正** —— 之前的"有内容"是 alpha 造成的假象
+
+### 13.1 修正过程
+
+前一轮的结论"内容确实写进去过、读回时已不在"是**错的**，错在我自己的统计口径：
+
+- 我按**字节**统计非零，得到 `64/256`（8x8 块）与 `2073600/8294400`（整块）；
+  这两个数**恰好等于"每像素只有 1 个字节非零"** —— 即 **A=255、RGB=0**。
+- 而 `frame.ppm` 是 P6（只有 RGB，没有 alpha），所以显示为全黑 —— 这部分判断是对的。
+- 反过来，早先用"每 64 字节抽 1 个"的采样，偏移恰好总落在 **R 通道**上，于是永远读到 0
+  —— 这也是为什么我一度认为"读回侧没问题"。
+
+改成**按像素统计 RGB**（排除 alpha）后，真实数据是：
+
+```
+VMHOST_BLIT src m_blitTex=47 fboStatus=0x8cd5 nonzeroRGB=0/64 err=0x0
+VMHOST_BLIT dst m_tex=46 nonzeroRGB=0/64 err=0x0
+VMHOST_READBACK tex=46 1080x1920 fbo=4 reattach=0 nzRGBpix=0/2073600 maxRGB=0 err=0x0
+frame.ppm：非零 R 采样 = 0，maxR = 0
+```
+
+### 13.2 由此修正的结论
+
+- **FBO ↔ 纹理映射是正确的**（`fbo=2↔tex25 / 3↔38 / 4↔46`，`attached=0` 但附件就是
+  创建时挂的那块，`reattach=0` 表示无需重挂）→ **"读错纹理"假设排除**。
+- **"post 错 buffer"确实存在**（guest flush 进 5/9/a，post 8/b），但**两块都是黑的**
+  → 它**不是**黑帧的根因。
+- 真相是：**访客渲染出来的就是不透明纯黑（RGB=0、A=255）**，那个 255 来自访客每帧一次的
+  `glClear`（GLES1 流量统计里 glClear 恰好每帧 1 次）。
+
+### 13.3 卡点回到"访客绘制没有产出 RGB"
+
+待查（按优先级）：
+1. **访客是否真的上传了纹理**：日志里 `glTexImage2D` 的尺寸/内容（可加一条低频日志，
+   只打尺寸与几个字节的校验和）；
+2. **绘制是否到达宿主 GL 并生效**：GLES2 直方图（`VMHOST_GLES2_HIST`）目前因未到 20 万条
+   阈值而没有输出 → 把阈值调小（例如 2 万条）再跑，看每帧的
+   `glDrawArrays/glDrawElements/glUseProgram/glTexImage2D` 数量是否正常；
+3. **宿主 GL 侧是否有静默失败**：结合每帧一次的 `0x502`（已知来自 blit 作用域析构，
+   与本问题无关）之外，再查绘制前后的 `glGetError`。
+
+> 注：`VMHOST_HACK_POST_CB` 那套"post 时改用 window surface CB"的兜底，本轮已证明
+> 不是修法；在 `patch_vmhost_diag.py` 里**默认不启用**（脚本侧已加开关），
+> 当前 WSL 源码树里仍是打开状态（下次干净重建时不带 `VMHOST_HACK_POST_CB=1` 即恢复）。

@@ -140,6 +140,47 @@ edit("host/gl/gles2_dec/gles2_dec.cpp", "vmhost_gles2_note(opcode, packetLen, pt
 # ----------------------------------------------------------------------------
 # 2) ColorBufferGl：blit 分段日志 + 源/目标采样 + readback 内容校验
 # ----------------------------------------------------------------------------
+edit("host/gl/ColorBufferGl.cpp", "VMHOST_FBO",
+     [("""bool bindFbo(GLuint* fbo, GLuint tex, bool ensureTextureAttached) {
+    if (*fbo) {
+        // fbo already exist - just bind
+        s_gles2.glBindFramebuffer(GL_FRAMEBUFFER, *fbo);
+        if (ensureTextureAttached) {
+            s_gles2.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0_OES,
+                                           GL_TEXTURE_2D, tex, 0);
+        }
+        return true;
+    }
+
+    s_gles2.glGenFramebuffers(1, fbo);
+    s_gles2.glBindFramebuffer(GL_FRAMEBUFFER, *fbo);
+    s_gles2.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0_OES,
+                                   GL_TEXTURE_2D, tex, 0);
+""",
+       """bool bindFbo(GLuint* fbo, GLuint tex, bool ensureTextureAttached) {
+    if (*fbo) {
+        // fbo already exist - just bind
+        s_gles2.glBindFramebuffer(GL_FRAMEBUFFER, *fbo);
+        if (ensureTextureAttached) {
+            s_gles2.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0_OES,
+                                           GL_TEXTURE_2D, tex, 0);
+        }
+        /* VMHOST_DIAG: 复用已有 FBO。注意 ensureTextureAttached=false 时**不会**重新
+           挂附件 —— 若该 FBO 上挂的不是 tex，就会读到别的纹理（"读回恒为 0"的嫌疑点）。 */
+        fprintf(stderr, "VMHOST_FBO reuse fbo=%u tex=%u attached=%d\\n",
+                *fbo, tex, (int)ensureTextureAttached);
+        return true;
+    }
+
+    s_gles2.glGenFramebuffers(1, fbo);
+    s_gles2.glBindFramebuffer(GL_FRAMEBUFFER, *fbo);
+    s_gles2.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0_OES,
+                                   GL_TEXTURE_2D, tex, 0);
+    fprintf(stderr, "VMHOST_FBO create fbo=%u tex=%u\\n", *fbo, tex);
+""")],
+     note="bindFbo 复用/新建分支日志")
+
+
 edit("host/gl/ColorBufferGl.cpp", "VMHOST_BLIT enter",
      [("""    if (!tInfo->currContext.get()) {
         // no Current context
@@ -200,12 +241,13 @@ edit("host/gl/ColorBufferGl.cpp", "VMHOST_BLIT src",
             const GLenum st = s_gles2.glCheckFramebufferStatus(GL_FRAMEBUFFER);
             s_gles2.glReadPixels(m_width / 2 - 4, m_height / 2 - 4, 8, 8,
                                  GL_RGBA, GL_UNSIGNED_BYTE, block);
+            /* 只数 RGB 非零的像素（排除 alpha：A=255 会掩盖"其实是黑的"） */
             size_t nz = 0;
-            for (size_t i = 0; i < sizeof(block); i++) {
-                if (block[i]) nz++;
+            for (size_t p = 0; p + 3 < sizeof(block); p += 4u) {
+                if (block[p] | block[p + 1] | block[p + 2]) nz++;
             }
             fprintf(stderr,
-                    "VMHOST_BLIT src m_blitTex=%u fboStatus=0x%x nonzero=%zu/256 err=0x%x\\n",
+                    "VMHOST_BLIT src m_blitTex=%u fboStatus=0x%x nonzeroRGB=%zu/64 err=0x%x\\n",
                     m_blitTex, st, nz, s_gles2.glGetError());
             s_gles2.glBindFramebuffer(GL_FRAMEBUFFER, prevFbo);
             s_gles2.glDeleteFramebuffers(1, &tmpFbo);
@@ -236,11 +278,12 @@ edit("host/gl/ColorBufferGl.cpp", "VMHOST_BLIT dst",
                                            GL_TEXTURE_2D, m_tex, 0);
             s_gles2.glReadPixels(m_width / 2 - 4, m_height / 2 - 4, 8, 8,
                                  GL_RGBA, GL_UNSIGNED_BYTE, block);
+            /* 只数 RGB 非零的像素（排除 alpha） */
             size_t nz = 0;
-            for (size_t i = 0; i < sizeof(block); i++) {
-                if (block[i]) nz++;
+            for (size_t p = 0; p + 3 < sizeof(block); p += 4u) {
+                if (block[p] | block[p + 1] | block[p + 2]) nz++;
             }
-            fprintf(stderr, "VMHOST_BLIT dst m_tex=%u nonzero=%zu/256 err=0x%x\\n",
+            fprintf(stderr, "VMHOST_BLIT dst m_tex=%u nonzeroRGB=%zu/64 err=0x%x\\n",
                     m_tex, nz, s_gles2.glGetError());
             s_gles2.glBindFramebuffer(GL_FRAMEBUFFER, prevFbo);
             s_gles2.glDeleteFramebuffers(1, &tmpFbo);
@@ -296,17 +339,29 @@ edit("host/gl/ColorBufferGl.cpp", "VMHOST_READBACK",
 
         s_gles2.glReadPixels(0, 0, m_width, m_height, format, GL_UNSIGNED_BYTE, img);
 
-        /* VMHOST_DIAG: 内容校验 —— 读回来的到底是不是黑的？
-           与写入侧（VMHOST_BLIT src/dst）对照即可判定黑帧在读侧还是写侧。 */
+        /* VMHOST_DIAG: 整块统计（**只看 RGB，排除 alpha**）。
+           注意：按字节抽样会把"RGB=0 但 A=255"的不透明黑误判成"有内容"
+           （nz 恰好等于像素数就是这种情形）；反过来每 64 字节抽样又总落在 R 上，
+           会把真实内容误判成全黑。所以这里明确按像素统计 RGB。 */
         {
             const size_t total = (size_t) m_width * (size_t) m_height * 4u;
-            size_t nz = 0;
-            for (size_t i = 0; i < total; i += 64u) {
-                if (img[i]) nz++;
+            size_t nzPix = 0;
+            unsigned mx = 0;
+            for (size_t p = 0; p + 3 < total; p += 4u) {
+                const unsigned r = img[p];
+                const unsigned g = img[p + 1];
+                const unsigned b = img[p + 2];
+                const unsigned v = r > g ? (r > b ? r : b) : (g > b ? g : b);
+                if (v) {
+                    nzPix++;
+                    if (v > mx) mx = v;
+                }
             }
             fprintf(stderr,
-                    "VMHOST_READBACK tex=%u %dx%d sampled=%zu nonzero=%zu err=0x%x\\n",
-                    m_tex, m_width, m_height, total / 64u, nz, s_gles2.glGetError());
+                    "VMHOST_READBACK tex=%u %dx%d fbo=%u reattach=%d nzRGBpix=%zu/%zu maxRGB=%u err=0x%x\\n",
+                    m_tex, m_width, m_height, m_fbo, (int) m_needFboReattach,
+                    nzPix, (size_t) m_width * (size_t) m_height, mx,
+                    s_gles2.glGetError());
         }
         unbindFbo();
     } else {
