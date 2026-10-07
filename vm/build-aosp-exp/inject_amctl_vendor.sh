@@ -42,6 +42,8 @@ for victim in /etc/NOTICE.xml.gz /etc/fs_config_dirs /etc/fs_config_files; do
 done
 
 put() { # put <本地文件> <镜像内路径> <八进制mode>
+    # 先删旧文件：重复注入时若目标已存在，debugfs write 会失败（inode 不复用）
+    debugfs -w -R "rm $2" "$DST" >/dev/null 2>&1 || true
     debugfs -w -R "write $1 $2" "$DST" >/dev/null 2>&1
     debugfs -w -R "sif $2 mode $3" "$DST" >/dev/null 2>&1
 }

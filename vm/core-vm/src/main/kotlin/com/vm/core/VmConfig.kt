@@ -17,6 +17,8 @@ data class VmConfig(
     val width: Int = 720,
     val height: Int = 1280,
     val dpi: Int = 320,
+    // 宿主机（测试机）内存只有 11GB，且系统自身常占 ~10GB；-m 4096 时 QEMU 拿不到
+    // 访客内存会卡在早期启动。2048 是当前实测能跑起来的档位。
     val memoryMb: Int = 2048,
     val cores: Int = 4,
     val gpuMode: GpuMode = GpuMode.GLES,

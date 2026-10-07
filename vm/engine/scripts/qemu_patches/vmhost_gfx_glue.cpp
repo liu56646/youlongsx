@@ -85,9 +85,11 @@ int32_t ANativeWindow_setBuffersGeometry(ANativeWindow* window, int32_t width,
 #include <unistd.h>
 #include <vector>
 #include <mutex>
+#include <dlfcn.h>
 
 // gfxstream
 #include "GfxStreamAgents.h"
+#include "OpenGLESDispatch/EGLDispatch.h"
 #include "RenderLibImpl.h"
 #include "host-common/opengl/emugl_config.h"
 #include "host-common/opengl/logger.h"
@@ -144,8 +146,138 @@ static void vmhost_gfx_log(const char* fmt, ...) {
     va_end(ap);
 }
 
+// ---- D15：「崩溃线程有没有 current GL 上下文」探针 --------------------------
+// 动机：宿主 Adreno 驱动在**固定指令**上 SIGSEGV（addr=0x38，near-null 解引用），
+// 最像"某线程没有 current EGL context 就发了 GL 调用，驱动在入口桩里解引用
+// NULL 的线程局部上下文"。
+//
+// 这里只查 **EGL 自己的状态**（eglGetCurrentContext / eglGetCurrentSurface），
+// 不去读 gfxstream 的 RenderThreadInfo —— 后者会连带拉进 gles1_dec/gles2_dec/
+// glsnapshot/vulkan 一大串内部头，给 glue 的编译链平添脆性；而"这一线程到底
+// 有没有绑定上下文"本来就该以 EGL 的回答为准。
+//
+// 安全性：两个入口都只查线程局部状态，信号处理器里调用可以接受；函数指针在
+// vmhost_gfx_init 里**预先解析**，免得在信号处理器里做 dlopen/dlsym。
+static void* (*s_eglGetCurrentContext)(void) = nullptr;
+static void* (*s_eglGetCurrentSurface)(int) = nullptr;
+
+static void vmhost_gfx_resolve_egl_probe(void) {
+    /* 注意：**不要**在这里 dlopen("libEGL.so")。
+       本函数在 vmhost_gfx_init 的最早期执行，此时主动把平台 libEGL 拉进全局
+       作用域，会改变 gfxstream 之后解析 EGL 符号的优先级（RTLD_DEFAULT 先命中
+       平台 libEGL 而不是它自己的 translator），实测会让
+       android_startOpenglesRenderer 直接返回 -1（宿主渲染器根本起不来）。
+       探针只是诊断用，取不到符号就退化成不打那一行。 */
+    s_eglGetCurrentContext =
+        reinterpret_cast<void* (*)(void)>(dlsym(RTLD_DEFAULT, "eglGetCurrentContext"));
+    s_eglGetCurrentSurface =
+        reinterpret_cast<void* (*)(int)>(dlsym(RTLD_DEFAULT, "eglGetCurrentSurface"));
+}
+
+// out 至少 3 项：[0] eglGetCurrentContext() [1] eglGetCurrentSurface(EGL_DRAW)
+//               [2] eglGetCurrentSurface(EGL_READ)
+// 由崩溃处理器（vmhost_pipe_glue.cpp）以弱符号调用。
+extern "C" int vmhost_gfx_egl_ctx_info(unsigned long long* out) {
+    for (int i = 0; i < 3; i++) {
+        out[i] = 0;
+    }
+    if (s_eglGetCurrentContext != nullptr) {
+        out[0] = (unsigned long long)(uintptr_t) s_eglGetCurrentContext();
+    }
+    if (s_eglGetCurrentSurface != nullptr) {
+        out[1] = (unsigned long long)(uintptr_t) s_eglGetCurrentSurface(0x3059 /*EGL_DRAW*/);
+        out[2] = (unsigned long long)(uintptr_t) s_eglGetCurrentSurface(0x305A /*EGL_READ*/);
+    }
+    return 0;
+}
+
 extern "C" int vmhost_gfx_init(void);
 extern "C" int vmhost_gfx_renderer_ready(void);
+
+// ---- D16：surfaceless make-current 的工作区修复 -----------------------------
+// D15 结论：宿主 Adreno 830 驱动在"上下文有效、但 draw/read surface 都是 NULL"时，
+// 会在固定指令 `LDR x5, [x21, #0x38]`（x21=0）上 SIGSEGV，**直接打死整个 QEMU 进程**。
+// 位置在 host/FrameBuffer.cpp 之外的某条 make-current 路径上（bindContext 已排除）。
+//
+// 与其逐个揪调用点，不如在**宿主侧唯一汇聚点**上包一层：gfxstream 所有内部调用
+// 都走 `gfxstream::gl::s_egl.eglMakeCurrent`（翻译器自己的 EglOsApi 那条路本来
+// 就拒绝无 surface 的 make-current，见 EglOsApi_egl.cpp 的 "warning: makeCurrent
+// a context without surface"）。
+//
+// 规则：
+//   1) ctx 非空 + draw/read 都是 NULL → 改绑一个 1x1 pbuffer。
+//      这类调用本来就是往 FBO 里画，pbuffer 的内容无关紧要。
+//   2) 若该 pbuffer 与 context 的 config 不匹配（eglMakeCurrent 失败），退化成
+//      "完全不绑上下文" —— 之后该线程的 GL 调用是无害的 no-op，总比驱动解引用
+//      NULL 把进程崩掉强。
+// 只有真的收到 surfaceless 请求才介入，其余一律原样透传。
+static EGLBoolean (*s_realEglMakeCurrent)(EGLDisplay, EGLSurface, EGLSurface,
+                                          EGLContext) = nullptr;
+static EGLSurface s_vmhostPbSurface = EGL_NO_SURFACE;
+
+static EGLSurface vmhost_get_probe_pbuffer(EGLDisplay dpy) {
+    if (s_vmhostPbSurface != EGL_NO_SURFACE) {
+        return s_vmhostPbSurface;
+    }
+    if (gfxstream::gl::s_egl.eglChooseConfig == nullptr ||
+        gfxstream::gl::s_egl.eglCreatePbufferSurface == nullptr) {
+        return EGL_NO_SURFACE;
+    }
+    const EGLint cfgAttribs[] = {
+        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8,
+        EGL_NONE};
+    EGLConfig cfg = nullptr;
+    EGLint n = 0;
+    if (!gfxstream::gl::s_egl.eglChooseConfig(dpy, cfgAttribs, &cfg, 1, &n) ||
+        n < 1 || cfg == nullptr) {
+        return EGL_NO_SURFACE;
+    }
+    const EGLint pbAttribs[] = {EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE};
+    s_vmhostPbSurface =
+        gfxstream::gl::s_egl.eglCreatePbufferSurface(dpy, cfg, pbAttribs);
+    return s_vmhostPbSurface;
+}
+
+static EGLBoolean vmhost_eglMakeCurrent(EGLDisplay dpy, EGLSurface draw,
+                                        EGLSurface read, EGLContext ctx) {
+    if (s_realEglMakeCurrent == nullptr) {
+        return EGL_FALSE;
+    }
+    if (ctx == EGL_NO_CONTEXT || draw != EGL_NO_SURFACE ||
+        read != EGL_NO_SURFACE) {
+        return s_realEglMakeCurrent(dpy, draw, read, ctx);
+    }
+    const EGLSurface pb = vmhost_get_probe_pbuffer(dpy);
+    if (pb != EGL_NO_SURFACE &&
+        s_realEglMakeCurrent(dpy, pb, pb, ctx) == EGL_TRUE) {
+        fprintf(stderr, "VMHOST_PBFIX surfaceless->pbuffer ok ctx=%p\n",
+                (void*)(uintptr_t)ctx);
+        return EGL_TRUE;
+    }
+    fprintf(stderr, "VMHOST_PBFIX surfaceless->unbind ctx=%p（总比驱动崩掉强）\n",
+            (void*)(uintptr_t)ctx);
+    return s_realEglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                                EGL_NO_CONTEXT);
+}
+
+static void vmhost_gfx_install_makecurrent_fix(void) {
+    if (s_realEglMakeCurrent != nullptr) {
+        return; /* 已装 */
+    }
+    if (gfxstream::gl::s_egl.eglMakeCurrent == nullptr) {
+        /* 表还没初始化就主动拉一次（init_egl_dispatch 自身幂等）。 */
+        gfxstream::gl::init_egl_dispatch();
+    }
+    if (gfxstream::gl::s_egl.eglMakeCurrent == nullptr) {
+        vmhost_gfx_log("D16 未装：s_egl.eglMakeCurrent 仍为空");
+        return;
+    }
+    s_realEglMakeCurrent = gfxstream::gl::s_egl.eglMakeCurrent;
+    gfxstream::gl::s_egl.eglMakeCurrent = vmhost_eglMakeCurrent;
+    vmhost_gfx_log("D16 已挂钩 s_egl.eglMakeCurrent（surfaceless → 1x1 pbuffer）");
+}
 
 // GLcommon/GLutils.h（gfxstream translator）：
 //   void setGles2Gles(bool isGles2gles);
@@ -172,6 +304,12 @@ extern "C" int vmhost_gfx_init(void) {
     //    必须在 renderer 启动前设置，且要在 guest 建立 HostConnection 之前。
     setGles2Gles(true);
     vmhost_gfx_log("已强制 gles2gles（GLSL 直通宿主，不做 desktop-GL 转译）");
+
+    // D15：预先解析崩溃探针要用的 EGL 入口（信号处理器里不做 dlopen/dlsym）
+    vmhost_gfx_resolve_egl_probe();
+    vmhost_gfx_log("D15 崩溃探针就绪：eglGetCurrentContext=%s eglGetCurrentSurface=%s",
+                   s_eglGetCurrentContext ? "ok" : "NULL",
+                   s_eglGetCurrentSurface ? "ok" : "NULL");
 
     // 1. agents
     android::emulation::injectGraphicsAgents(
@@ -308,6 +446,14 @@ extern "C" int vmhost_gfx_init(void) {
             }
         }
     }
+
+    // 7. D16（surfaceless make-current 的工作区修复）**已停用**：
+    //    它把"surfaceless 的 makeCurrent"改成"绑 1x1 pbuffer"，pbuffer 不可用时
+    //    还会退化成"完全不绑上下文"—— 后者会在该线程上制造出"没有 current
+    //    context"的状态，紧接着的 GL 调用就会让 Adreno 驱动解引用 NULL
+    //    （实测崩溃现场 D15 探针正是 eglGetCurrentContext=0x0）。而且它整轮
+    //    一次都没命中（PBFIX 计数 0）。保留函数体备查，但不再安装。
+    // vmhost_gfx_install_makecurrent_fix();
     return 0;
 }
 
@@ -407,79 +553,23 @@ extern "C" int vmhost_gfx_screenshot_to_file(const char* path, int max_w, int ma
     if (vmhost_gfx_write_latest_ppm(path) == 0) {
         return 0;
     }
-    if (max_w > 0 || max_h > 0) {
-        vmhost_gfx_log("screenshot: 无 post-callback 帧（fallback 不做缩放）");
-    }
-    const gfxstream::RendererPtr& renderer = android_getOpenglesRenderer();
-    if (!renderer) {
-        vmhost_gfx_log("screenshot: renderer 未就绪");
-        return -1;
-    }
-    unsigned int w = 0, h = 0;
-    size_t cap = 0;
-    // 第一步：pixels=NULL 探尺寸。gfxstream 约定：空间不够返回 -2 并回填需要的字节数。
-    int res = renderer->getScreenshot(3, &w, &h, NULL, &cap, /*displayId*/ 0,
-                                      max_w > 0 ? max_w : 0,
-                                      max_h > 0 ? max_h : 0, /*desiredRotation*/ 0);
-    if (res != -2 || cap == 0 || w == 0 || h == 0) {
-        // res=-1：m_lastPostedColorBuffer 无效，即 guest 还没有成功 post 过帧
-        // （ColorBuffer 在全局 map 里查不到 / handle 为 0）。
-        vmhost_gfx_log("screenshot: 尺寸探测失败 res=%d cap=%zu %ux%u", res, cap, w, h);
-        return -1;
-    }
-    std::vector<uint8_t> pixels(cap);
-    res = renderer->getScreenshot(3, &w, &h, pixels.data(), &cap, /*displayId*/ 0,
-                                  max_w > 0 ? max_w : 0,
-                                  max_h > 0 ? max_h : 0, /*desiredRotation*/ 0);
-    if (res != 0) {
-        vmhost_gfx_log("screenshot: 读取失败 res=%d", res);
-        return -1;
-    }
-    // getScreenshot(format=3) 给的是 RGBA8888，每像素 4 字节；
-    // 而 P6 每像素只有 3 字节。这里先确认缓冲够大，避免越界读。
-    const size_t px = (size_t) w * (size_t) h;
-    if (cap < px * 4u) {
-        vmhost_gfx_log("screenshot: 缓冲不足 cap=%zu 需要=%zu", cap, px * 4u);
-        return -1;
-    }
-    // 先写临时文件再 rename，保证 App 侧永远读不到半帧。
-    char tmp[1024];
-    if (snprintf(tmp, sizeof(tmp), "%s.tmp", path) >= (int)sizeof(tmp)) {
-        return -1;
-    }
-    FILE* fp = fopen(tmp, "wb");
-    if (fp == NULL) {
-        vmhost_gfx_log("screenshot: 无法写 %s", tmp);
-        return -1;
-    }
-    fprintf(fp, "P6\n%u %u\n255\n", w, h);
-    // 关键：必须把 RGBA 拆成 RGB 写入。
-    // 之前是 fwrite(pixels.data(), 1, cap, fp)，把 4 字节/像素的 RGBA 直接
-    // 倒进了声明为 3 字节/像素的 P6 文件 —— 消费端（App 侧帧回传）读到的
-    // 就是错位的花屏数据。
-    // 另外不要逐像素 fputc：先在内存里打包好，再一次 fwrite。
-    {
-        std::vector<uint8_t> rgb(px * 3u);
-        for (size_t i = 0; i < px; i++) {
-            rgb[i * 3u + 0] = pixels[i * 4u + 0];
-            rgb[i * 3u + 1] = pixels[i * 4u + 1];
-            rgb[i * 3u + 2] = pixels[i * 4u + 2];
-        }
-        const size_t written = fwrite(rgb.data(), 1, rgb.size(), fp);
-        if (written != rgb.size()) {
-            vmhost_gfx_log("screenshot: 写入不完整 %zu/%zu", written, rgb.size());
-            fclose(fp);
-            unlink(tmp);
-            return -1;
-        }
-    }
-    fclose(fp);
-    if (rename(tmp, path) != 0) {
-        unlink(tmp);
-        return -1;
-    }
-    vmhost_gfx_log("screenshot: %ux%u -> %s", w, h, path);
-    return 0;
+    /*
+     * 不再走 getScreenshot 兜底（D14）。
+     *
+     * getScreenshot → ColorBufferGl::readback 会在**调用线程上直接发 GL 命令**，
+     * 而本函数跑在 200ms 轮询的截图线程上 —— 该线程没有 renderer 的 EGL context。
+     * 在错误的线程上发 GL 调用是 gfxstream 的禁忌：
+     *   1) 读回内容恒为 0，于是"画面全黑"很可能只是**读错了**，不是访客没画；
+     *   2) 会破坏 GL 分发表 / 渲染通道状态 —— 观察到
+     *      RenderChannelImpl::readFromGuest → updateStateLocked → canPopLocked 的 SIGSEGV。
+     *
+     * post callback（vmhost_gfx_on_post）是在渲染线程里同步拷贝像素，与传输路径无关，
+     * 才是唯一正确的取帧方式。没有 post 帧时宁可返回失败，也不再去碰 renderer。
+     */
+    (void)max_w;
+    (void)max_h;
+    vmhost_gfx_log("screenshot: 尚无 post-callback 帧（getScreenshot 兜底已禁用）");
+    return -1;
 }
 
 // 后台线程：轮询 <frame_dir>/frame.request（内容 "宽 高"，可缺省）。

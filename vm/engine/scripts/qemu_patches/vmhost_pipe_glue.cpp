@@ -783,6 +783,14 @@ static bool vmhost_crash_peek(uint64_t addr, uint64_t *out) {
  */
 extern "C" void vmhost_gles2_dump_recent(void) __attribute__((weak));
 
+/*
+ * D15: 由 vmhost_gfx_glue.cpp 提供，报告**崩溃线程**的 EGL 状态（权威答案）：
+ *   out[0]=eglGetCurrentContext()  [1]=eglGetCurrentSurface(EGL_DRAW)
+ *   [2]=eglGetCurrentSurface(EGL_READ)
+ * 用弱符号：该文件依赖 libEGL 的运行时解析，允许缺席。
+ */
+extern "C" int vmhost_gfx_egl_ctx_info(unsigned long long *out) __attribute__((weak));
+
 static void vmhost_crash_handler(int sig, siginfo_t *si, void *ucp) {
     ucontext_t *uc = (ucontext_t *)ucp;
     char buf[256];
@@ -840,6 +848,24 @@ static void vmhost_crash_handler(int sig, siginfo_t *si, void *ucp) {
         }
     }
 #endif
+
+    /*
+     * D15：本线程到底有没有 current GL 上下文？
+     * 驱动在**固定指令**上 addr=0x38 崩溃，最像"没有 current context 的线程
+     * 发了 GL 调用，驱动入口桩解引用 NULL 的线程局部上下文"。
+     * 直接问 EGL（权威答案）：eglCtx=0 即本线程根本没绑上下文。
+     */
+    if (vmhost_gfx_egl_ctx_info != nullptr) {
+        unsigned long long info[3] = {0, 0, 0};
+        vmhost_gfx_egl_ctx_info(info);
+        snprintf(buf, sizeof buf,
+                 "gl_ctx: eglGetCurrentContext=0x%llx eglDrawSurface=0x%llx "
+                 "eglReadSurface=0x%llx\n",
+                 info[0], info[1], info[2]);
+        vmhost_crash_w(buf);
+    } else {
+        vmhost_crash_w("gl_ctx: 探针符号缺失\n");
+    }
 
     vmhost_crash_w("--- backtrace (fp walk) ---\n");
     vmhost_crash_pc(pc);

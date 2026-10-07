@@ -143,9 +143,325 @@ fi
 #    ColorBuffer 的 blit 与 readback 探针、TextureDraw 链接结果、FrameBuffer::post 打点。
 #    逐条幂等（marker 命中即跳过），锚点未命中只告警不中断 —— 诊断插桩不是构建必需。
 #    用法与说明见 qemu_patches/patch_vmhost_diag.py 的文件头。
-if [ -f "$TOOLS_DIR/qemu_patches/patch_vmhost_diag.py" ]; then
+#    VMHOST_DIAG=0 可整体关闭，用于做「干净基线」对比（排除插桩本身影响行为）。
+#    注意：关掉之前必须先把已打补丁的文件从 git 还原，否则只是"不重复打补丁"，
+#    旧补丁仍留在源码里 —— 干净基线的还原命令：
+#      git -C "$SRC_DIR" checkout -- host/gl/gles2_dec/gles2_dec.cpp \
+#          host/gl/ColorBufferGl.cpp host/gl/TextureDraw.cpp \
+#          host/FrameBuffer.cpp host/FrameBuffer.h host/RenderControl.cpp
+if [ "${VMHOST_DIAG:-1}" = "1" ] && [ -f "$TOOLS_DIR/qemu_patches/patch_vmhost_diag.py" ]; then
     python3 "$TOOLS_DIR/qemu_patches/patch_vmhost_diag.py" "$SRC_DIR" || \
         echo "!! VMHOST_DIAG 插桩脚本执行异常（仅告警，继续构建）" >&2
+else
+    echo "==> VMHOST_DIAG=0：跳过宿主侧诊断插桩（干净基线）"
+fi
+
+# 5b) VMHOST_BINDCTX：定位"谁把上下文绑成没有 surface 的"（D15 结论）。
+#     宿主 Adreno 830 驱动在"上下文有效但 draw/read surface = NULL"时会于固定指令
+#     `LDR x5,[x21,#0x38]`（x21=0）上 SIGSEGV，从而 QEMU 整个进程死掉 —— 这正是
+#     "合不出帧 / 所有被 post 的 ColorBuffer 全 0 / 访客从不 post"的上游原因。
+#     FrameBuffer::bindContext() 是唯一允许 draw/read 传 EGL_NO_SURFACE 的入口，
+#     所以在那里打点：draw/read 为 0 且 ctx 非 0 即肇事调用，并带出调用方偏移。
+#     这个探针**不碰 GL 状态**，与 VMHOST_DIAG 的开关系独立。
+f="$SRC_DIR/host/FrameBuffer.cpp"
+if grep -q "VMHOST_BINDCTX" "$f"; then
+    echo "==> patch: bindContext 无 surface 打点（已打过，跳过）"
+else
+    python3 - "$f" <<'VMHOST_PY2'
+import io, sys
+p = sys.argv[1]
+src = io.open(p, encoding='utf-8').read()
+
+anchor_inc = "#include <stdio.h>\n#include <string.h>\n#include <time.h>\n"
+new_inc = anchor_inc + (
+    "#include <stdlib.h>      /* VMHOST_BINDCTX: sscanf */\n"
+    "#include <sys/syscall.h> /* VMHOST_BINDCTX: SYS_gettid */\n"
+    "#include <unistd.h>      /* VMHOST_BINDCTX: syscall */\n")
+if anchor_inc not in src:
+    sys.stderr.write("!! VMHOST_BINDCTX include 锚点未命中\n")
+    sys.exit(1)
+src = src.replace(anchor_inc, new_inc, 1)
+
+anchor = """    if (!s_egl.eglMakeCurrent(getDisplay(),
+                              draw ? draw->getEGLSurface() : EGL_NO_SURFACE,
+                              read ? read->getEGLSurface() : EGL_NO_SURFACE,
+                              ctx ? ctx->getEGLContext() : EGL_NO_CONTEXT)) {
+        ERR("eglMakeCurrent failed");
+        return false;
+    }
+"""
+probe = anchor + """
+    /* VMHOST_BINDCTX: 谁把上下文绑成了"没有 surface"？
+       draw/read 为 0 且 ctx 非 0 = 肇事调用；caller_off 是调用方相对
+       libqemu_exec.so 基址的偏移，可直接 addr2line 定位到 host/*.cpp 行。 */
+    {
+        static uintptr_t s_base = 0;
+        static int s_baseDone = 0;
+        if (!s_baseDone) {
+            s_baseDone = 1;
+            FILE* mf = fopen("/proc/self/maps", "r");
+            if (mf != NULL) {
+                char ml[512];
+                while (fgets(ml, sizeof ml, mf) != NULL) {
+                    if (strstr(ml, "libqemu_exec.so") != NULL) {
+                        unsigned long v = 0;
+                        if (sscanf(ml, "%lx", &v) == 1) {
+                            s_base = (uintptr_t)v;
+                        }
+                        break;
+                    }
+                }
+                fclose(mf);
+            }
+        }
+        const uintptr_t ra = (uintptr_t)__builtin_return_address(0);
+        fprintf(stderr,
+                "VMHOST_BINDCTX tid=%ld draw=%p read=%p ctx=%p caller_off=0x%zx\\n",
+                (long)syscall(SYS_gettid),
+                (void*)(uintptr_t)(draw ? draw->getEGLSurface() : EGL_NO_SURFACE),
+                (void*)(uintptr_t)(read ? read->getEGLSurface() : EGL_NO_SURFACE),
+                (void*)(uintptr_t)(ctx ? ctx->getEGLContext() : EGL_NO_CONTEXT),
+                (size_t)(ra - s_base));
+    }
+"""
+if anchor not in src:
+    sys.stderr.write("!! VMHOST_BINDCTX 主体锚点未命中\n")
+    sys.exit(1)
+src = src.replace(anchor, probe, 1)
+io.open(p, 'w', encoding='utf-8').write(src)
+VMHOST_PY2
+    grep -q "VMHOST_BINDCTX" "$f" \
+        && echo "==> patch: bindContext 无 surface 打点已注入" \
+        || { echo "!! VMHOST_BINDCTX 补丁未生效" >&2; exit 1; }
+fi
+
+# 5c) VMHOST_MAKECURFIX：真正的修点 —— 翻译器到平台 EGL 的那一层。
+#     EglOsEglDisplay::makeCurrent() 传给平台 EGL 的 surface 参数是 surface 对象的
+#     底层 EGL handle，而该 handle 可能是 0（已销毁/从未创建）。这时它就变成
+#     eglMakeCurrent(dpy, 0, 0, ctx)：**上下文在、draw/read surface 为空** ——
+#     宿主 Adreno 830 驱动正是在这个状态下于固定指令 `LDR x5,[x21,#0x38]`（x21=0）
+#     上 SIGSEGV（D15 实测：eglGetCurrentContext 非空、两边 surface 都是 0），
+#     直接打死整个 QEMU 进程。
+#     修法：用 1x1 pbuffer 顶上缺的那一边，让驱动始终有合法 surface。
+f="$SRC_DIR/host/gl/glestranslator/EGL/EglOsApi_egl.cpp"
+if [ "${VMHOST_MAKECURFIX:-1}" = "0" ]; then
+    echo "==> VMHOST_MAKECURFIX=0：跳过 makeCurrent 修复（二分用；需先把该文件 git 还原）"
+elif grep -q "VMHOST_MAKECURFIX" "$f"; then
+    echo "==> patch: makeCurrent surfaceless→pbuffer 修复（已打过，跳过）"
+else
+    python3 - "$f" <<'VMHOST_PY3'
+import io, sys
+p = sys.argv[1]
+src = io.open(p, encoding='utf-8').read()
+
+anchor = """    EglOsEglSurface* readSfc = (EglOsEglSurface*)read;
+    EglOsEglSurface* drawSfc = (EglOsEglSurface*)draw;
+    EglOsEglContext* ctx = (EglOsEglContext*)context;
+    if (ctx && !readSfc) {
+        D("warning: makeCurrent a context without surface\\n");
+        return false;
+    }
+    D("%s %p\\n", __FUNCTION__, ctx ? ctx->context() : nullptr);
+    bool ret = mDispatcher.eglMakeCurrent(
+            mDisplay, drawSfc ? drawSfc->getHndl() : EGL_NO_SURFACE,
+            readSfc ? readSfc->getHndl() : EGL_NO_SURFACE,
+            ctx ? ctx->context() : EGL_NO_CONTEXT);
+"""
+repl = """    EglOsEglSurface* readSfc = (EglOsEglSurface*)read;
+    EglOsEglSurface* drawSfc = (EglOsEglSurface*)draw;
+    EglOsEglContext* ctx = (EglOsEglContext*)context;
+    if (ctx && !readSfc) {
+        D("warning: makeCurrent a context without surface\\n");
+        return false;
+    }
+    D("%s %p\\n", __FUNCTION__, ctx ? ctx->context() : nullptr);
+
+    /* VMHOST_MAKECURFIX: surface 对象的底层 EGL handle 可能是 0，此时平台调用就
+       退化成 eglMakeCurrent(dpy, 0, 0, ctx) —— 上下文在、draw/read surface 为空。
+       宿主 Adreno 830 驱动在此状态下会于固定指令 LDR x5,[x21,#0x38]（x21=0）
+       上 SIGSEGV 打死整个 QEMU。这里用 1x1 pbuffer 顶上缺的那一边。 */
+    EGLSurface vmhostDrawHndl = drawSfc ? drawSfc->getHndl() : EGL_NO_SURFACE;
+    EGLSurface vmhostReadHndl = readSfc ? readSfc->getHndl() : EGL_NO_SURFACE;
+    if (ctx != nullptr && (vmhostDrawHndl == EGL_NO_SURFACE ||
+                           vmhostReadHndl == EGL_NO_SURFACE)) {
+        static EGLSurface s_vmhostPbuf = EGL_NO_SURFACE;
+        if (s_vmhostPbuf == EGL_NO_SURFACE && mDispatcher.eglChooseConfig &&
+            mDispatcher.eglCreatePbufferSurface) {
+            const EGLint pbufCfgAttribs[] = {
+                EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+                EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+                EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8,
+                EGL_NONE};
+            EGLConfig pbufCfg = nullptr;
+            EGLint nCfg = 0;
+            if (mDispatcher.eglChooseConfig(mDisplay, pbufCfgAttribs, &pbufCfg, 1,
+                                            &nCfg) &&
+                nCfg > 0 && pbufCfg != nullptr) {
+                const EGLint pbufAttribs[] = {EGL_WIDTH, 1, EGL_HEIGHT, 1,
+                                              EGL_NONE};
+                s_vmhostPbuf = mDispatcher.eglCreatePbufferSurface(
+                        mDisplay, pbufCfg, pbufAttribs);
+            }
+        }
+        if (s_vmhostPbuf != EGL_NO_SURFACE) {
+            if (vmhostDrawHndl == EGL_NO_SURFACE) vmhostDrawHndl = s_vmhostPbuf;
+            if (vmhostReadHndl == EGL_NO_SURFACE) vmhostReadHndl = s_vmhostPbuf;
+            fprintf(stderr,
+                    "VMHOST_MAKECURFIX surfaceless -> 1x1 pbuffer (ctx=%p caller=0x%zx)\\n",
+                    (void*)ctx->context(),
+                    (size_t)(uintptr_t)__builtin_return_address(0));
+        } else {
+            fprintf(stderr, "VMHOST_MAKECURFIX surfaceless 且 pbuffer 不可用 (ctx=%p)\\n",
+                    (void*)ctx->context());
+        }
+    }
+
+    bool ret = mDispatcher.eglMakeCurrent(
+            mDisplay, vmhostDrawHndl, vmhostReadHndl,
+            ctx ? ctx->context() : EGL_NO_CONTEXT);
+"""
+if anchor not in src:
+    sys.stderr.write("!! VMHOST_MAKECURFIX 锚点未命中\n")
+    sys.exit(1)
+src = src.replace(anchor, repl, 1)
+io.open(p, 'w', encoding='utf-8').write(src)
+VMHOST_PY3
+    grep -q "VMHOST_MAKECURFIX" "$f" \
+        && echo "==> patch: makeCurrent surfaceless→pbuffer 修复已注入" \
+        || { echo "!! VMHOST_MAKECURFIX 补丁未生效" >&2; exit 1; }
+fi
+
+# 5d) VMHOST_EGLSTRING：补齐宿主对 EGL_VENDOR / EGL_EXTENSIONS 的回答。
+#     访客侧 libEGL_emulation.so 的 eglDisplay::queryString 对这三个名字会走
+#     HostConnection → rcEncoder → rcGetGLString(name, buf, size)（反汇编确认）：
+#       0x3053 EGL_VENDOR / 0x3054 EGL_VERSION / 0x3055 EGL_EXTENSIONS
+#     而宿主这份表只为 GL_* 准备内容（追加段全是 `if (name == GL_EXTENSIONS)`），
+#     对 EGL_EXTENSIONS 就会去调 glGetString(0x3055) → NULL → 返回**空串**。
+#     平台 libEGL 的 eglQueryStringImplementationANDROID 要求客户端扩展里含
+#     EGL_EXT_client_extensions，否则直接返回 NULL；而 SurfaceFlinger 的
+#     GLESRenderEngine::create 对该返回值是 LOG_ALWAYS_FATAL
+#     （"eglQueryStringImplementationANDROID(EGL_VERSION) failed"）→ SF 反复 abort，
+#     init 里 `restart zygote` 级联重启 → 永远 boot 不完、合不出帧。这里补齐。
+f="$SRC_DIR/host/RenderControl.cpp"
+if grep -q "VMHOST_EGLSTRING" "$f"; then
+    echo "==> patch: rcGetGLString 补 EGL_* 名字（已打过，跳过）"
+else
+    python3 - "$f" <<'VMHOST_PY4'
+import io, sys
+p = sys.argv[1]
+src = io.open(p, encoding='utf-8').read()
+
+anchor = "static EGLint rcGetGLString(EGLenum name, void* buffer, EGLint bufferSize) {\n"
+repl = anchor + """    /* VMHOST_EGLSTRING: 访客侧 EGL 会用 rcGetGLString 索取 EGL_VENDOR /
+       EGL_EXTENSIONS（0x3053 / 0x3055，见 guest libEGL_emulation 的
+       eglDisplay::queryString）。上游这张表只为 GL_* 名字准备内容，EGL_* 会落到
+       glGetString(0x3055) → NULL → 返回空串，访客就把"实现扩展为空"缓存下来。
+       注意：这**不是** SurfaceFlinger "eglQueryStringImplementationANDROID(
+       EGL_VERSION) failed" 的原因 —— 平台侧那个函数只在 validate_display()
+       失败时返回 NULL（已反汇编确认），换句话说真正的问题是访客 eglInitialize
+       没成功。这里只是把 EGL_* 查询按访客自带静态串补齐。 */
+    if (name == 0x3053 /*EGL_VENDOR*/ || name == 0x3055 /*EGL_EXTENSIONS*/) {
+        const char* eglStr = (name == 0x3053) ? "Google Android emulator"
+                                              : kVMHostEglExtensions;
+        const int eglLen = (int)strlen(eglStr) + 1;
+        if (!buffer || eglLen > (int)bufferSize) {
+            return -eglLen;
+        }
+        memcpy(buffer, eglStr, (size_t)eglLen);
+        return eglLen;
+    }
+
+"""
+if anchor not in src:
+    sys.stderr.write("!! VMHOST_EGLSTRING 锚点未命中\\n")
+    sys.exit(1)
+src = src.replace(anchor, repl, 1)
+
+# 常量放在 include 区之后、函数定义之前（该文件没有 <stdio.h>，用 <string.h> 作锚点）。
+inc_anchor = "#include <string.h>\n"
+if inc_anchor not in src:
+    sys.stderr.write("!! VMHOST_EGLSTRING include 锚点未命中\\n")
+    sys.exit(1)
+const_text = """#include <string.h>
+
+/* VMHOST_EGLSTRING: 返回给访客的 EGL_VENDOR / EGL_EXTENSIONS。
+   内容**照抄访客 libEGL_emulation.so 自带的静态串**（strings 偏移 0x4b40 /
+   0x4b58 / 0x4bbb / 0x4bda），不要臆造：
+     "Google Android emulator"
+     "EGL_ANDROID_image_native_buffer EGL_KHR_fence_sync EGL_KHR_image_base
+      EGL_KHR_gl_texture_2d_image EGL_ANDROID_native_fence_sync EGL_KHR_wait_sync"
+   宿主原实现对 EGL_* 名字会落到 glGetString(0x3055) → NULL → 返回空串，访客那侧
+   就会把它当"实现扩展为空"缓存下来。 */
+static const char kVMHostEglExtensions[] =
+    "EGL_ANDROID_image_native_buffer "
+    "EGL_KHR_fence_sync "
+    "EGL_KHR_image_base "
+    "EGL_KHR_gl_texture_2d_image "
+    "EGL_ANDROID_native_fence_sync "
+    "EGL_KHR_wait_sync";
+"""
+src = src.replace(inc_anchor, const_text, 1)
+io.open(p, 'w', encoding='utf-8').write(src)
+VMHOST_PY4
+    grep -q "VMHOST_EGLSTRING" "$f" \
+        && echo "==> patch: rcGetGLString 补 EGL_* 名字已注入" \
+        || { echo "!! VMHOST_EGLSTRING 补丁未生效" >&2; exit 1; }
+fi
+
+# 5e) VMHOST_RC 握手探针：访客 eglDisplay::initialize 依次要
+#       rcGetRendererVersion()                      （前导）
+#       rcGetEGLVersion(&maj, &min) == 1            （失败点 D）
+#       rcQueryEGLString(...)                       （EGL 扩展/厂商串）
+#     任一失败 → eglInitialize 返回 false；平台 libEGL 的 egl_display_t
+#     isInitialized() 保持 false → eglQueryStringImplementationANDROID(EGL_VERSION)
+#     返回 NULL → SurfaceFlinger LOG_ALWAYS_FATAL。这里只**只读打点**，不改行为，
+#     用来判定访客到底走到了哪一步（是根本没连上，还是连上了但某一步失败）。
+f="$SRC_DIR/host/RenderControl.cpp"
+if grep -q "VMHOST_RC handshake" "$f"; then
+    echo "==> patch: rc 握手探针（已打过，跳过）"
+else
+    python3 - "$f" <<'VMHOST_PY5'
+import io, sys
+p = sys.argv[1]
+src = io.open(p, encoding='utf-8').read()
+
+edits = [
+    ("static GLint rcGetRendererVersion()\n{\n",
+     "static GLint rcGetRendererVersion()\n{\n"
+     "    fprintf(stderr, \"VMHOST_RC handshake rcGetRendererVersion\\n\");  /* VMHOST_RC */\n"),
+    ("static EGLint rcGetEGLVersion(EGLint* major, EGLint* minor)\n{\n",
+     "static EGLint rcGetEGLVersion(EGLint* major, EGLint* minor)\n{\n"
+     "    fprintf(stderr, \"VMHOST_RC handshake rcGetEGLVersion enter\\n\");  /* VMHOST_RC */\n"),
+    ("static EGLint rcQueryEGLString(EGLenum name, void* buffer, EGLint bufferSize)\n{\n",
+     "static EGLint rcQueryEGLString(EGLenum name, void* buffer, EGLint bufferSize)\n{\n"
+     "    fprintf(stderr, \"VMHOST_RC handshake rcQueryEGLString name=0x%x size=%d\\n\",  /* VMHOST_RC */\n"
+     "            (unsigned)name, (int)bufferSize);\n"),
+]
+for anchor, repl in edits:
+    if anchor not in src:
+        sys.stderr.write("!! VMHOST_RC 锚点未命中: " + anchor.splitlines()[0] + "\n")
+        sys.exit(1)
+    src = src.replace(anchor, repl, 1)
+
+# rcGetEGLVersion 的返回值也记一笔（失败点 D 是"返回值 != 1"）。
+ret_anchor = ("    fb->getEmulationGl().getEglVersion(major, minor);\n"
+              "\n"
+              "    return EGL_TRUE;\n")
+ret_repl = ("    fb->getEmulationGl().getEglVersion(major, minor);\n"
+            "    fprintf(stderr, \"VMHOST_RC handshake rcGetEGLVersion maj=%d min=%d -> TRUE\\n\",  /* VMHOST_RC */\n"
+            "            (int)(major ? *major : -1), (int)(minor ? *minor : -1));\n"
+            "\n"
+            "    return EGL_TRUE;\n")
+if ret_anchor in src:
+    src = src.replace(ret_anchor, ret_repl, 1)
+else:
+    sys.stderr.write("!! VMHOST_RC rcGetEGLVersion 返回点锚点未命中（仅告警）\n")
+
+io.open(p, 'w', encoding='utf-8').write(src)
+VMHOST_PY5
+    grep -q "VMHOST_RC handshake" "$f" \
+        && echo "==> patch: rc 握手探针已注入" \
+        || { echo "!! VMHOST_RC 补丁未生效" >&2; exit 1; }
 fi
 
 # ---------------------------------------------------------------- 1. configure

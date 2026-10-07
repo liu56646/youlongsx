@@ -329,6 +329,11 @@ static int spawn_qemu_child(const VmQemuParams *p, const char *exe_path, const c
         }
         /* AOSP QEMU 依赖同目录的 glib/pixman/... ，必须显式给库搜索路径 */
         setenv("LD_LIBRARY_PATH", lib_dir, 1);
+        /* 管道服务日志：打印访客的 pipe 请求有没有走到 aemu 的 AndroidPipe 服务
+           （含首包的 "pipe:<name>" 服务名）。已知可用基线（exp47 的 Oct 5 构建）
+           里访客会打开 7 次 `pipe:opengles`；这里用来对比 App 路径到底有没有打开，
+           以定位"访客 EGL 连不上宿主"是没发起还是没被服务。 */
+        setenv("VMHOSTPIPE_SVC", "1", 1);
         /* 崩溃诊断：aemu 的 Thread::maskAllSignals() 用 sigfillset 把 SIGSEGV 也屏蔽了，
            QEMU 自带的崩溃处理器因此永不触发，现场只剩"日志突然中断"。
            libsigfix.so 拦截 pthread_sigmask/sigprocmask，把崩溃信号从屏蔽集里剔掉。 */

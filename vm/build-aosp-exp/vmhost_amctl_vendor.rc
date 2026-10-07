@@ -25,6 +25,12 @@ service vmhost_amctl /system/bin/sh /vendor/bin/vmhost_amctl.sh
 # enforcing（audit=0 会把拒绝藏起来），这里尽力再置一次；失败只是多一行日志。
 on early-init
     write /sys/fs/selinux/enforce 0
+    # TCG 下 iorapd 一直重试 "Cannot get package manager service!"（PMS 未就绪前的纯空转），
+    # 关掉以减少无谓的 CPU 争抢。
+    setprop ro.iorapd.enable false
+    # bootanim 在 TCG 下会一直占据一个渲染线程 + 每秒刷新，关掉把 CPU 让给开机路径。
+    # SurfaceFlinger 在更晚的启动阶段才读它，early-init 设置能赶上。
+    setprop debug.sf.nobootanimation 1
 
 on post-fs
     write /sys/fs/selinux/enforce 0
