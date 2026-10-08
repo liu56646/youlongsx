@@ -133,8 +133,8 @@ edit("host/gl/gles2_dec/gles2_dec.cpp", "VMHOST_GLES2_HIST",
      note="GLES2 直方图/环形缓冲/低频参数")
 
 edit("host/gl/gles2_dec/gles2_dec.cpp", "vmhost_gles2_note(opcode, packetLen, ptr)",
-     [("\t\tuint32_t packetLen = *(uint32_t *)(ptr + 4);\n\t\tif (end - ptr < packetLen) return ptr - (unsigned char*)buf;",
-       "\t\tuint32_t packetLen = *(uint32_t *)(ptr + 4);\n\t\tvmhost_gles2_note(opcode, packetLen, ptr);   /* VMHOST_DIAG */\n\t\tif (end - ptr < packetLen) return ptr - (unsigned char*)buf;")],
+     [("\t\tuint32_t packetLen = *(uint32_t *)(ptr + 4);\n",
+       "\t\tuint32_t packetLen = *(uint32_t *)(ptr + 4);\n\t\tvmhost_gles2_note(opcode, packetLen, ptr);   /* VMHOST_DIAG */\n")],
      note="在解码循环里调用 note()")
 
 

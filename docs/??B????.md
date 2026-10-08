@@ -649,3 +649,100 @@ gl_ctx: eglGetCurrentContext=0x0 eglDrawSurface=0x0 eglReadSurface=0x0
    与本次崩溃修复无关，需另开一轮。
 2. 宿主内存仍是硬约束：`memoryMb=2048` 才能起来（见 §15.4）。
 
+---
+
+# §17 2026-10-08（二）：黑屏排查 —— **§11 的"post 错 buffer"结论被推翻**，黑屏是访客真实状态
+
+## 17.1 结论先行
+崩溃修好、渲染器健康之后重新测，结论与 §11～§14 相反：
+
+1. **访客 post 的就是它自己合成的结果**，不存在"post 错 buffer"；
+2. **读回链路是准的**（读回统计与交付的 `frame.ppm` 像素完全对得上）；
+3. **黑屏的直接原因是：访客从头到尾没有显示过任何 Activity**
+   （console 里 `ActivityTaskManager: START|Displayed` 计数 = 0）——
+   屏幕上本来就没有东西可显示，不是被宿主丢掉了。
+
+## 17.2 证据链（一次干净运行，真机 cc96ded5 / 实例 vm_1）
+访客的提交序列（`rc` opcode 参数，窗口 surface = 0x9）稳定成环：
+```
+10015 rcSetWindowColorBuffer(ws=0x9, cb=0x8)
+10018 rcFBPost(cb=0xc)
+10016 rcFlushWindowColorBuffer(ws=0x9)
+10015 rcSetWindowColorBuffer(ws=0x9, cb=0xa)   ← 0x8/0xa/0xb 三轮换
+10018 rcFBPost(cb=0xd)
+10016 rcFlushWindowColorBuffer(ws=0x9)
+```
+统计（本次运行）：
+| 事件 | 计数 | 参数 |
+|---|---|---|
+| `rcSetWindowColorBuffer` | 345 / 344 / 344 | 都是 `ws=0x9`，cb = 0x8 / 0xa / 0xb |
+| `rcFlushWindowColorBuffer` | 1034 | 都是 `ws=0x9` |
+| `rcFBPost` | 519 + 518 | cb = 0xc / 0xd |
+| `rcBindTexture` | 18+17+17+7 | cb = 0xb / 0xa / 0x8 / 0xd |
+
+关键在最后一行：**访客把 0x8/0xa/0xb（它渲染进去的那三块）用 `rcBindTexture` 当纹理绑上去**，
+也就是它自己用 GL 把图层采样、合成进 0xc/0xd，然后 post 0xc/0xd。
+所以 **post 的正是合成结果**，`VMHOST_READBACK tex=26/30` 读的也就是这张合成图。
+
+读回与画面的对应（同一时刻）：
+```
+VMHOST_READBACK tex=26 1080x1920 fbo=4 reattach=0 nzRGBpix=2917/2073600 maxRGB=255 err=0x0
+frame.ppm（P6 1080x1920）按像素统计：非零像素 2917  —— 与读回数字**完全一致**
+```
+⇒ 读出准确；画面本身就只有 2917 个非零像素（≈0.14%），集中在屏幕正中
+（`x≈360..720, y≈840..1080`，一块很暗的小斑点）。
+
+## 17.3 §11/§12 的修正
+- §11 记的"`rcFBPost` 的 handle 与 `rcSetWindowColorBuffer` 设置的渲染目标不是同一块"
+  —— 现象是真的，但**结论错了**：那不是 bug，而是访客"图层(0x8/0xa/0xb) →
+  合成(0xc/0xd) → post(0xc/0xd)"的标准两段式，中间那步是 `rcBindTexture` + GL 绘制。
+- §12 的 `VMHOST_HACK_POST_CB`（post 时改用 window surface CB 当像素源）
+  **基于错误前提**，已确认是伪修法；本次已把它从源码树还原（默认不启用）。
+
+## 17.4 黑屏的直接原因
+访客 console（`console.log`）显示：
+```
+[  583.3s] WindowManager: Keyguard drawn timeout. Setting mKeyguardDrawComplete
+[  654.9s] OnBootPhase_600_ActivityTaskManagerService
+[  825.4s] sys.boot_completed=1
+[  895.5s] ssm.onStartUser-0_ActivityTaskManagerService      ← 开始切用户
+[  949.9s] SystemUIBootTiming: DependencyInjection           ← SystemUI 才刚起来
+[ 1022.0s] （console 时间戳到此不再前进）
+```
+`ActivityTaskManager: START` / `Displayed` 计数 **= 0** —— **没有任何 Activity 被启动或显示**。
+即：访客 `boot_completed` 了，但 SystemUI/Launcher 的绘制还没完成，屏幕上就没有内容。
+（TCG 无 KVM 下访客极慢：SystemServer 到 900s 才切用户，期间 539s / 681s 各一次 ANR dump。）
+
+**所以"黑屏"此刻等于"访客还没画出东西"**，不是渲染/回传链路的缺陷。
+早期那种"顶部一条亮带 + 底部一个方框"的帧，是开机动画阶段的正常画面。
+
+## 17.5 新发现：宿主跑约 17 分钟后会崩（另一类崩溃，与 Adreno 无关）
+在 guest ≈1022s（本轮跑了 23 万条 GL 命令）时，宿主又一次 `signal=11`：
+```
+signal=11 si_code=2 addr=0x75c0759000 tid=25891
+pc=0x56b5764c18 lr=0x56b5764c30        ← 都在 libqemu_exec.so 内（不是 adreno）
+gl_ctx: eglGetCurrentContext=0x0 ...
+VMHOST_GLES2_RECENT total=230799        ← 崩溃前已处理 23 万条
+```
+对 `pc/lr/回溯帧` 做 `llvm-addr2line`（按 `r-xp` 段偏移 0x732000 换算）得到：
+```
+android::base::BufferQueue<android::base::SmallFixedVector<char, 512ul>>::closeLocked()
+        aemu/base/include/aemu/base/containers/BufferQueue.h:203
+std::__split_buffer<std::unique_ptr<std::variant<monostate, Start, Touch, Stop,
+        EndMonitoring, Poll>>>::begin()        ← emugl HealthMonitor 的事件表
+```
+⇒ 崩点在 **aemu 的 `BufferQueue`（goldfish pipe 的数据队列）+ emugl `HealthMonitor`** 相关
+代码上，`si_code=2`(SEGV_ACCERR，写越界/权限) 且地址落在 scudo 堆区 —— 像堆破坏/竞态。
+这一条会**在访客刚要显示 UI 的时候把整个 VM 打死**，是当前最该修的问题。
+
+## 17.6 下一步（按优先级）
+1. **修 17.5 的崩溃**（跑 ~17min 必崩）。可先试：不启用 HealthMonitor 的 watchdog
+   路径、把 `AsyncResult`/readback 改成同步（`asyncReadbackSupported()` 返回 false 时
+   走 `cb->glOpReadback`），以及检查 pipe `BufferQueue` 是否被多线程并发写。
+2. 让访客真正把 UI 画出来（它太慢）：观察 `Displayed` 出现后再判画面；
+   必要时在 guest 侧关掉重服务（SystemUI/Launcher 之外的）以加速。
+3. 复现脚本化：本次用 `VMHOST_DIAG=1` 运行即可拿到上面所有表格；
+   另注意 `patch_vmhost_diag.py` 里 `vmhost_gles2_note` 的插入锚点已改成短锚点
+   （原先与 `patch_vmhost_surface.py` 的锚点冲突，导致 GLES2 侧全部探针被静默丢掉）。
+
+
