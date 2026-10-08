@@ -553,23 +553,83 @@ extern "C" int vmhost_gfx_screenshot_to_file(const char* path, int max_w, int ma
     if (vmhost_gfx_write_latest_ppm(path) == 0) {
         return 0;
     }
-    /*
-     * 不再走 getScreenshot 兜底（D14）。
+    /* D14b：恢复 getScreenshot 兜底 —— 复核 gfxstream 源码后确认它是**线程安全**的。
      *
-     * getScreenshot → ColorBufferGl::readback 会在**调用线程上直接发 GL 命令**，
-     * 而本函数跑在 200ms 轮询的截图线程上 —— 该线程没有 renderer 的 EGL context。
-     * 在错误的线程上发 GL 调用是 gfxstream 的禁忌：
-     *   1) 读回内容恒为 0，于是"画面全黑"很可能只是**读错了**，不是访客没画；
-     *   2) 会破坏 GL 分发表 / 渲染通道状态 —— 观察到
-     *      RenderChannelImpl::readFromGuest → updateStateLocked → canPopLocked 的 SIGSEGV。
+     * RendererImpl::getScreenshot → FrameBuffer::getScreenshot 会把回读命令
+     * （PostCmd::Screenshot）经 sendPostWorkerCmd 投给 **post worker 线程**执行并等
+     * future 完成，GL 命令并**不在调用线程上发**。之前把它当成"在 200ms 轮询线程上
+     * 直接发 GL"而禁用（D14），是误判 —— 当时真正坏掉的是 MAKECURFIX/D16 造出来的
+     * "没有 current context"状态。
      *
-     * post callback（vmhost_gfx_on_post）是在渲染线程里同步拷贝像素，与传输路径无关，
-     * 才是唯一正确的取帧方式。没有 post 帧时宁可返回失败，也不再去碰 renderer。
+     * 它自身失败的真正原因是：displayId==0 时取 m_lastPostedColorBuffer，访客没有
+     * post 过就没有可读的 CB，此时干净返回 -1（不会崩）。所以作为兜底是安全的：
+     * 有 post 帧时优先用 post callback（不缩放），没有时按请求尺寸回读一次。
      */
-    (void)max_w;
-    (void)max_h;
-    vmhost_gfx_log("screenshot: 尚无 post-callback 帧（getScreenshot 兜底已禁用）");
-    return -1;
+    if (max_w > 0 || max_h > 0) {
+        vmhost_gfx_log("screenshot: 无 post-callback 帧，走 getScreenshot 兜底（不做缩放）");
+    }
+    const gfxstream::RendererPtr& renderer = android_getOpenglesRenderer();
+    if (!renderer) {
+        vmhost_gfx_log("screenshot: renderer 未就绪");
+        return -1;
+    }
+    unsigned int w = 0, h = 0;
+    size_t cap = 0;
+    // 第一步：pixels=NULL 探尺寸。gfxstream 约定：空间不够返回 -2 并回填需要的字节数。
+    int res = renderer->getScreenshot(3, &w, &h, NULL, &cap, /*displayId*/ 0,
+                                      max_w > 0 ? max_w : 0,
+                                      max_h > 0 ? max_h : 0, /*desiredRotation*/ 0);
+    if (res != -2 || cap == 0 || w == 0 || h == 0) {
+        // res=-1：m_lastPostedColorBuffer 无效，即 guest 还没有成功 post 过帧。
+        vmhost_gfx_log("screenshot: 尺寸探测失败 res=%d cap=%zu %ux%u", res, cap, w, h);
+        return -1;
+    }
+    std::vector<uint8_t> pixels(cap);
+    res = renderer->getScreenshot(3, &w, &h, pixels.data(), &cap, /*displayId*/ 0,
+                                  max_w > 0 ? max_w : 0,
+                                  max_h > 0 ? max_h : 0, /*desiredRotation*/ 0);
+    if (res != 0) {
+        vmhost_gfx_log("screenshot: 读取失败 res=%d", res);
+        return -1;
+    }
+    // getScreenshot(format=3) 给的是 RGBA8888，每像素 4 字节；而 P6 每像素 3 字节。
+    const size_t px = (size_t)w * (size_t)h;
+    if (cap < px * 4u) {
+        vmhost_gfx_log("screenshot: 缓冲不足 cap=%zu 需要=%zu", cap, px * 4u);
+        return -1;
+    }
+    // 先写临时文件再 rename，保证 App 侧永远读不到半帧。
+    char tmp[1024];
+    if (snprintf(tmp, sizeof(tmp), "%s.tmp", path) >= (int)sizeof(tmp)) {
+        return -1;
+    }
+    FILE* fp = fopen(tmp, "wb");
+    if (fp == NULL) {
+        vmhost_gfx_log("screenshot: 无法写 %s", tmp);
+        return -1;
+    }
+    fprintf(fp, "P6\n%u %u\n255\n", w, h);
+    // 必须把 RGBA 拆成 RGB 写入：直接 fwrite 4 字节/像素会让 P6 数据整体错位。
+    size_t written = 0;
+    for (size_t i = 0; i < px; i++) {
+        const uint8_t* s = pixels.data() + i * 4u;
+        if (fputc(s[0], fp) == EOF || fputc(s[1], fp) == EOF || fputc(s[2], fp) == EOF) {
+            break;
+        }
+        written += 3;
+    }
+    fclose(fp);
+    if (written != px * 3u) {
+        vmhost_gfx_log("screenshot: 写入不完整 %zu/%zu", written, px * 3u);
+        remove(tmp);
+        return -1;
+    }
+    if (rename(tmp, path) != 0) {
+        vmhost_gfx_log("screenshot: rename 失败 %s", tmp);
+        remove(tmp);
+        return -1;
+    }
+    return 0;
 }
 
 // 后台线程：轮询 <frame_dir>/frame.request（内容 "宽 高"，可缺省）。

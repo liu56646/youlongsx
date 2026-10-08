@@ -404,21 +404,24 @@ edit("host/gl/TextureDraw.cpp", "VMHOST_TEXTUREDRAW",
 # ----------------------------------------------------------------------------
 # 4) FrameBuffer::post：记录被 post 的 ColorBuffer（访客 handle ↔ 宿主 GL 纹理）
 # ----------------------------------------------------------------------------
-edit("host/FrameBuffer.cpp", "VMHOST_POST handle=",
+edit("host/FrameBuffer.cpp", "VMHOST_POST fb=",
      [("""    m_lastPostedColorBuffer = p_colorbuffer;
 """,
        """    m_lastPostedColorBuffer = p_colorbuffer;
 
     /* VMHOST_DIAG: 记录"被 post 的那块 buffer"——访客 handle 与宿主 GL 纹理名。
        与 VMHOST_BLIT 的目标纹理对照，即可判定"渲染的 buffer 是否就是被 post 的
-       buffer"（黑帧的直接原因）。 */
-    fprintf(stderr, "VMHOST_POST handle=0x%llx cbHndl=0x%llx tex=%u %ux%u\\n",
+       buffer"（黑帧的直接原因）。fb= 打印的是本 FrameBuffer 实例地址，用来和
+       VMHOST_FBREG / VMHOST_RCFLUSH 的指针对比：若三者不一致，说明访客的提交
+       落在另一个 FrameBuffer 上，我们注册回调的那个自然永远收不到帧。 */
+    fprintf(stderr, "VMHOST_POST fb=%p handle=0x%llx cbHndl=0x%llx tex=%u %ux%u\\n",
+            (void*) this,
             (unsigned long long) p_colorbuffer,
             (unsigned long long) colorBuffer->getHndl(),
             (unsigned) colorBuffer->glOpGetTexture(),
             colorBuffer->getWidth(), colorBuffer->getHeight());
 """)],
-     note="post 的 ColorBuffer 打点")
+     note="post 的 ColorBuffer 打点（含 FB 实例）")
 
 
 # ----------------------------------------------------------------------------
@@ -594,6 +597,66 @@ if os.environ.get("VMHOST_HACK_POST_CB") == "1":
 # ----------------------------------------------------------------------------
 # 执行
 # ----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# 5) 帧提交路径探针：访客把帧交给了谁、我们的 post 回调有没有真的挂上
+#
+#    背景：SF 健康、访客开机完成，但 FrameBuffer::m_lastPostedColorBuffer 始终
+#    无效（getScreenshot 兜底一直 res=-1）→ 意味着"访客的帧没有走到我们注册回调
+#    的那个 FrameBuffer"。这里测三件事，靠打印的 fb= 指针互相对照：
+#      a) setPostCallback 有没有被 display 检查拦下 —— 该分支会
+#         ERR("... cancelling OnPost callback") 后直接 return，而 glue 侧是 void
+#         调用，照样会打"已注册 post callback"，属于静默失败；
+#      b) 访客有没有真的调 rcFBPost（→ VMHOST_POST，带 fb=）；
+#      c) 访客有没有 rcFlushWindowColorBuffer（历史探针说见过 flush 5/9/a）。
+#    三者 fb= 不一致 => 两个 FrameBuffer 实例；全都一致且都有日志 => 提交路径正常，
+#    问题另在别处（例如 displayId 不是 0）。
+# ----------------------------------------------------------------------------
+edit("host/RenderControl.cpp", "VMHOST_RCFLUSH",
+     [("""    HandleType colorBufferHandle = fb->getEmulatedEglWindowSurfaceColorBufferHandle(windowSurface);
+""",
+       """    HandleType colorBufferHandle = fb->getEmulatedEglWindowSurfaceColorBufferHandle(windowSurface);
+
+    /* VMHOST_DIAG: 访客提交路径之二 —— 把 window surface 对应的 CB flush 给宿主。
+       限速：只在 cb 或 FrameBuffer 实例变化时打印，避免拖慢渲染。 */
+    {
+        static unsigned long long s_vmhostLastCb = ~0ull;
+        static FrameBuffer* s_vmhostLastFb = nullptr;
+        if ((unsigned long long) colorBufferHandle != s_vmhostLastCb || fb != s_vmhostLastFb) {
+            s_vmhostLastCb = (unsigned long long) colorBufferHandle;
+            s_vmhostLastFb = fb;
+            fprintf(stderr, "VMHOST_RCFLUSH fb=%p ws=%u cb=0x%llx\\n",
+                    (void*) fb, windowSurface, (unsigned long long) colorBufferHandle);
+        }
+    }
+""")],
+     note="rcFlushWindowColorBuffer 打点")
+
+edit("host/FrameBuffer.cpp", "VMHOST_FBREG enter",
+     [("""void FrameBuffer::setPostCallback(Renderer::OnPostCallback onPost, void* onPostContext,
+                                  uint32_t displayId, bool useBgraReadback) {
+    AutoLock lock(m_lock);
+    if (onPost) {
+""",
+       """void FrameBuffer::setPostCallback(Renderer::OnPostCallback onPost, void* onPostContext,
+                                  uint32_t displayId, bool useBgraReadback) {
+    AutoLock lock(m_lock);
+    /* VMHOST_DIAG: 记录回调挂在哪个 FrameBuffer 实例上（与 VMHOST_POST /
+       VMHOST_RCFLUSH 的 fb= 对照）。 */
+    fprintf(stderr, "VMHOST_FBREG enter fb=%p displayId=%u onPost=%p\\n",
+            (void*) this, displayId, (void*) onPost);
+    if (onPost) {
+"""),
+      ("""            ERR("display %d not exist, cancelling OnPost callback", displayId);
+            return;
+""",
+       """            ERR("display %d not exist, cancelling OnPost callback", displayId);
+            /* VMHOST_DIAG: 回调被静默取消了 —— glue 是 void 调用，看不出来。 */
+            fprintf(stderr, "VMHOST_FBREG 取消：display %u 不存在，回调没挂上\\n", displayId);
+            return;
+""")],
+     note="setPostCallback 打点（含被取消分支）")
+
+
 def main():
     if len(sys.argv) < 2:
         print("用法: patch_vmhost_diag.py <gfxstream 源码根目录>", file=sys.stderr)

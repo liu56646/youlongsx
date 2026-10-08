@@ -63,12 +63,21 @@ echo "==> 日志   $LOG"
 # ------------------------------------------------------- 0. 源码重置 + 补丁
 # 每次从 git 干净版本重新打补丁，保证幂等。
 if git -C "$SRC_DIR" rev-parse --git-dir >/dev/null 2>&1; then
-    echo "==> 从 git 恢复待打补丁的 CMakeLists"
+    echo "==> 从 git 恢复待打补丁的源文件"
     git -C "$SRC_DIR" checkout -- \
         host/CMakeLists.txt \
         host/gl/glestranslator/EGL/CMakeLists.txt \
-        host/apigen-codec-common/CMakeLists.txt 2>/dev/null || true
+        host/apigen-codec-common/CMakeLists.txt \
+        host/gl/OpenGLESDispatch/GLESv2Dispatch.cpp \
+        host/gl/GLESVersionDetector.cpp 2>/dev/null || true
 fi
+
+# 0a) GLESv2Dispatch.cpp 必须保持**上游**的符号查找顺序
+#     （`::translator::gles2::fn` 优先）。曾经手工改成"优先 dlsym 宿主
+#     libGLESv2.so"，那会绕过 gfxstream 自己的上下文校验，把访客 GL 直接打到
+#     宿主驱动上：一旦该线程没有 current context，Adreno 830 就 SIGSEGV 打死
+#     整个 QEMU（实测 guest≈550s，SF 一开始真正渲染就崩）。
+#     所以这里每次强制还原；若确实需要那条捷径，请用脚本显式打补丁，不要手改。
 
 # 1) 非 WIN32/APPLE/QNX 一律用 NativeSubWindow_x11.cpp；换成 Android 版
 f="$SRC_DIR/host/CMakeLists.txt"
@@ -244,8 +253,11 @@ fi
 #     直接打死整个 QEMU 进程。
 #     修法：用 1x1 pbuffer 顶上缺的那一边，让驱动始终有合法 surface。
 f="$SRC_DIR/host/gl/glestranslator/EGL/EglOsApi_egl.cpp"
-if [ "${VMHOST_MAKECURFIX:-1}" = "0" ]; then
-    echo "==> VMHOST_MAKECURFIX=0：跳过 makeCurrent 修复（二分用；需先把该文件 git 还原）"
+# 【已废弃】旧版内联补丁按 eglChooseConfig 自选一个 config 造 pbuffer，与 context 的
+# config 不匹配 → eglMakeCurrent 返回 EGL_BAD_MATCH → android_startOpenglesRenderer
+# 被打成 -1。代码保留备查但不再执行；实际生效的加固见下方 5c-bis 调用的脚本。
+if true; then
+    echo "==> VMHOST_MAKECURFIX：旧版内联补丁已停用（见 5c-bis）"
 elif grep -q "VMHOST_MAKECURFIX" "$f"; then
     echo "==> patch: makeCurrent surfaceless→pbuffer 修复（已打过，跳过）"
 else
@@ -331,6 +343,20 @@ VMHOST_PY3
         || { echo "!! VMHOST_MAKECURFIX 补丁未生效" >&2; exit 1; }
 fi
 
+# 5c-bis) VMHOST_MAKECURFIX / VMHOST_PBUFSURF（现行版）：
+#         ① 加固 makeCurrent —— 缺 surface 时用"试绑成功才采用"的 1x1 pbuffer 顶上，
+#            绝不把渲染线程留在"没有 current context"上；
+#         ② 恢复 createPbufferSurface 的真实实现（上游整段注释掉、恒返回 handle=0），
+#            访客的 pbuffer 不再是假句柄，从源头消除 eglMakeCurrent(dpy,0,0,ctx)。
+#         两者合起来修掉"Adreno 830 SIGSEGV @ addr=0x38"（见 §15）。
+#         幂等：脚本内部按 marker 逐条判断。
+if [ "${VMHOST_MAKECURFIX:-1}" = "0" ]; then
+    echo "==> VMHOST_MAKECURFIX=0：跳过 surface 加固（二分用）"
+else
+    python3 "$TOOLS_DIR/qemu_patches/patch_vmhost_surface.py" "$SRC_DIR" || {
+        echo "!! VMHOST_MAKECURFIX/VMHOST_PBUFSURF 补丁失败" >&2; exit 1; }
+fi
+
 # 5d) VMHOST_EGLSTRING：补齐宿主对 EGL_VENDOR / EGL_EXTENSIONS 的回答。
 #     访客侧 libEGL_emulation.so 的 eglDisplay::queryString 对这三个名字会走
 #     HostConnection → rcEncoder → rcGetGLString(name, buf, size)（反汇编确认）：
@@ -406,6 +432,40 @@ VMHOST_PY4
     grep -q "VMHOST_EGLSTRING" "$f" \
         && echo "==> patch: rcGetGLString 补 EGL_* 名字已注入" \
         || { echo "!! VMHOST_EGLSTRING 补丁未生效" >&2; exit 1; }
+fi
+
+# 5d-bis) VMHOST_FORCE_GLES2：host 模式把 maxVersion 压到 GLES_DISPATCH_MAX_VERSION_2。
+#     原因：宿主 EGL context 取 ES3 时，TextureDraw 的 GLSL 1.0 shader 在 Adreno 上
+#     编译失败（`glAttachShader` 0x501 → `TextureDraw: Could not create/link program`），
+#     压到 ES2 后正常。之前这条是**手工改在源码树里**的（外面那份 patch_gfxstream33.py
+#     顺带还改了 GLESv2Dispatch.cpp —— 那条捷径已证明有害，见上面 0a），这里固化成
+#     脚本步骤，配合 step 0 的 git 还原，保证每次构建状态可复现。
+f="$SRC_DIR/host/gl/GLESVersionDetector.cpp"
+if [ "${VMHOST_FORCE_GLES2:-1}" = "0" ]; then
+    echo "==> VMHOST_FORCE_GLES2=0：跳过（二分用）"
+elif grep -q "VMHOST_FORCE_GLES2" "$f"; then
+    echo "==> patch: force GLES2（已打过，跳过）"
+else
+    python3 - "$f" <<'VMHOST_PY5'
+import io, sys
+p = sys.argv[1]
+src = io.open(p, encoding='utf-8').read()
+old = """        if (s_egl.eglGetMaxGLESVersion) {
+            maxVersion =
+                (GLESDispatchMaxVersion)s_egl.eglGetMaxGLESVersion(dpy);
+        }"""
+new = """        /* VMHOST_FORCE_GLES2: 把宿主 EGL context 压到 ES2。
+           取 ES3 时 TextureDraw 的 GLSL 1.0 shader 在 Adreno 上编译失败
+           （glAttachShader 0x501 → TextureDraw: Could not create/link program）。 */
+        maxVersion = GLES_DISPATCH_MAX_VERSION_2;"""
+if old not in src:
+    sys.stderr.write("!! VMHOST_FORCE_GLES2 锚点未命中\n")
+    sys.exit(1)
+io.open(p, 'w', encoding='utf-8').write(src.replace(old, new, 1))
+VMHOST_PY5
+    grep -q "VMHOST_FORCE_GLES2" "$f" \
+        && echo "==> patch: force GLES2 已注入" \
+        || { echo "!! VMHOST_FORCE_GLES2 补丁未生效" >&2; exit 1; }
 fi
 
 # 5e) VMHOST_RC 握手探针：访客 eglDisplay::initialize 依次要
