@@ -745,4 +745,71 @@ std::__split_buffer<std::unique_ptr<std::variant<monostate, Start, Touch, Stop,
    另注意 `patch_vmhost_diag.py` 里 `vmhost_gles2_note` 的插入锚点已改成短锚点
    （原先与 `patch_vmhost_surface.py` 的锚点冲突，导致 GLES2 侧全部探针被静默丢掉）。
 
+---
+
+# §18 2026-10-08（三）：访客 UI 显示慢 —— **把 QEMU 钉到大核，实测 1.4x**
+
+## 18.1 结论
+**唯一实测有效的杠杆是「把 QEMU 进程钉到宿主主频最高的核」**，App 路径紧邻 A/B 实测
+**1.43x**（surfaceflinger 147.1s → 102.9s）。其余能想到的加速路径全部被排除：
+KVM 不可用、MTTCG 反而更慢、vCPU 数无影响、访客内存没有抖动。
+
+## 18.2 实测数据
+**A) App 路径、紧邻两次运行（同一镜像/参数，唯一的差别是钉不钉核）**
+
+| 运行 | 钉核 | zygote | surfaceflinger | 当时大核上限 |
+|---|---|---|---|---|
+| A | ✓ cpu6,7 | **53.2s** | **102.9s** | 1.69 GHz（被温控压住） |
+| B | ✗ | 77.4s | **147.1s** | 1.96 GHz |
+
+B 的温控条件**更好**却慢 1.43x ⇒ 钉核收益是实打实的（干净条件下更大）。
+
+**B) 手工 harness（`mt_ab.sh`，不钉核基线 vs 钉核，同参数）**
+
+| 里程碑 | 不钉核 | 钉 cpu6,7 |
+|---|---|---|
+| servicemanager | 26.0s | 19.0s |
+| zygote | 75.8s | 53.4s |
+| surfaceflinger | 154.4s | 104.1s |
+
+**C) 宿主拓扑（8 Gen 3）**：cpu0–5 = 3.53GHz，**cpu6/7 = 4.32GHz**。
+
+## 18.3 排除掉的路径（都实测过）
+| 路径 | 结果 |
+|---|---|
+| **KVM** | 不可用。内核 `CONFIG_KVM=y`（`kvm-arm.mode=protected`），但 `/proc/misc` 里没有 kvm、手工 `mknod /dev/kvm c 10 232` 后 `dd` 报 **No such device** —— 设备跑在 Qualcomm **Gunyah**（`/sys/class/misc/gunyah`）之下、内核在 EL1，KVM 无法初始化。 |
+| **MTTCG**（`-accel tcg,thread=multi`） | **更慢**：同条件对照 SF 96s→135s，且 CPU 始终 ~107%（从未 >1 核）。 |
+| **vCPU 数**（`-smp 2` vs `4`） | 无影响（SF 153.5s vs 154.4s）。⇒ 访客启动基本是**单线程**的，多核/多线程 TCG 都是白亏同步开销。 |
+| **访客内存** | 无抖动迹象（console 里 `lmkd` 无杀进程、无 `am_kill`）。 |
+| **`performance` governor** | 在温控下**无效甚至更慢**（温控把 `scaling_max_freq` 压到 1.69GHz，硬件上限 4.32GHz）。 |
+
+## 18.4 关键认知：访客速度几乎线性跟随宿主**实际主频**
+- 手工跑（root shell 子进程、后台调度）比 App 跑（前台 app 子进程、有 boost）
+  慢 ~1.6x —— 同样的镜像与参数；根因就是调度/主频不同。
+- 因此**跨时段对比不可靠**，调优必须紧邻 A/B。为此新增了
+  `vm/build-aosp-exp/mt_ab.sh`（按 App 完全相同的参数手工起 QEMU，里程碑直接读访客
+  内核时间戳，`taskset c0` 可指定亲和）。
+
+## 18.5 落点（不用重打 APK）
+引擎 spawn QEMU 时**只** `LD_PRELOAD` 了 `libsigfix.so`
+（见 `vm/engine/src/main/cpp/src/vm_qemu.c:340`），所以它是唯一"给 QEMU 子进程加启动
+修正"的注入点。在 `vm/build-aosp-exp/libsigfix.c` 里新增 `VMHOST_PIN`：
+- 构造函数里逐核读 `cpuN/cpufreq/cpuinfo_max_freq`，**取主频最高的一组**（本机 = 6,7），
+  调 `sched_setaffinity`；线程继承掩码，一次即覆盖 QEMU 全部线程；
+- 读不到主频就**不干预**；`VMHOST_PIN_CPUS=<hex 掩码>` 可手工指定，`=0` 关闭（A/B 用）；
+- 启动时在 stderr 打一行 `VMHOST_PIN 已把 QEMU 钉到主频最高的核：6,7` 便于确认。
+
+编译：`vm/build-aosp-exp/build_sigfix.sh`（NDK clang，产物已更新到
+`vm/engine/src/main/jniLibs/arm64-v8a/libsigfix.so`）；设备上替换
+`nativeLibraryDir/libsigfix.so` 即可生效。
+
+## 18.6 遗留（要做"秒开"还差什么）
+钉核只把 ~14min 的启动压到 ~10min，量级没变。要真正快，只有两条结构性路线：
+1. **削减访客的启动工作量**（镜像级）：访客自身计时显示 `Zygote64Timing: PreloadClasses`
+   单项就要 22–35s；SystemServer/SystemUI 是后段大头（`boot_completed` 前后），
+   需要按服务裁剪或换更精简的镜像；
+2. **快照/恢复**（QEMU `savevm`/`loadvm`）：启动一次后保存，之后秒级恢复 ——
+   收益最大，但 gfxstream/Virtio 设备的状态保存是主要风险点，属独立大工程。
+
+
 
