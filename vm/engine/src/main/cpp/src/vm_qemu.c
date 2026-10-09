@@ -241,6 +241,20 @@ static int spawn_qemu_child(const VmQemuParams *p, const char *exe_path, const c
 
     s_argc = 0;
     add_arg("%s", "qemu-system-aarch64");
+    /* MTTCG。
+       实测（真机 cc96ded5，见 docs/方案B排障交接.md §21）：
+       1) `thread=multi` 被本版 QEMU 接受（不报错），但实测 QEMU 的 CPU 仍压在
+          1 个宿主线程上（96%），其余线程近乎空闲、宿主 8 核空着 600% ——
+          guest 已进 userspace 多线程阶段时依然如此，说明该构建的 TCG 实际
+          仍是单线程（`-smp` 只影响 guest 看到的核数，不带来并行执行）。
+       2) `tb-size` **不是本版 tcg accel 的合法参数**：加上它 QEMU 会直接
+          `Invalid parameter 'tb-size'` 并以 code=1 退出（本仓 QEMU 的 -accel
+          实现约当 2.10，那时 tb-size 还没进 tcg accel）。所以翻译块缓存
+          大小不可运行时调，只能吃编译期默认值。
+       结论：保留 thread=multi（不报错、且换个支持 MTTCG 的构建即自动受益），
+       但不要把提速寄望于它。 */
+    add_arg("%s", "-accel");
+    add_arg("%s", "tcg,thread=multi");
     add_arg("%s", "-M");
     add_arg("%s", "ranchu");
     add_arg("%s", "-cpu");

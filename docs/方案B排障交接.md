@@ -967,5 +967,64 @@ memcpy(s_latest_pixels.data(), pixels, need);
 - `frame.ppm` 既是排障资产又是显示源，朝向必须与 PPM 约定一致。
   在宿主 shader 里"补翻"能修显示，但会让排障资产继续骗人 —— 那是错误的位置。
 
+## 21. 2026-10-09（三）：访客"太慢" —— 单线程 TCG 是硬限制，内存换 swap 是最大杠杆
+
+### 21.1 结论先行
+
+1. **根本限制**：本机没有 KVM（内核 EL1，无 `/dev/kvm`），QEMU 只能纯软件
+   模拟（TCG）；而**本仓这版 QEMU 的 TCG 是单线程的** —— 6 个 vCPU 全挤在
+   **1 个宿主线程**上轮转，宿主 8 核只用到 ~1 核。这是"慢"的主因，且无法靠
+   调参绕过。
+2. **最大可落地杠杆是内存**：guest 由 4096MB 降到 3072MB，实测**启动推进速度
+   提升 1.36x**（见 21.4）。原因是宿主总内存 11GB 被 4GB guest 挤到
+   **swap 已用 2GB**，guest 每次缺页都变成磁盘 I/O。
+3. 帧回传、诊断日志**都不是**瓶颈（见 21.3）。
+
+### 21.2 证据：TCG 确实是单线程
+
+`top -H`（guest 已进 userspace，iorapd / PackageManager 在跑）：
+
+```
+800%cpu  121%user  66%sys  604%idle        ← 宿主 8 核，空着 6 核
+16451 ... R 100  5:38.32  libqemu_exec.so   ← 只有这一个线程在跑
+16452 ... S 1.7
+16456 ... S 1.7
+16453 ... S 1.7
+```
+
+CPU 全部集中在 1 个线程（100%），其余线程近乎空闲 —— 单线程 TCG 下每个 vCPU
+线程都在抢同一把全局锁，`-smp 6` 只改变 guest 看到的核数，不带来并行。
+
+### 21.3 试过但此路不通
+
+| 尝试 | 结果 |
+|---|---|
+| `-accel tcg,thread=multi` | **被接受、不报错，但实测无效**：线程分布仍是单个 100%，其余 1.7%。该构建未把 MTTCG 编进来 |
+| `-accel tcg,thread=multi,tb-size=256` | QEMU **直接启动失败**：`Invalid parameter 'tb-size'`，`子进程 QEMU 正常退出，code=1`。本仓 QEMU 的 `-accel` 实现约当 2.10，那时 tb-size 还没进 tcg accel |
+| 帧回传走文件是否拖慢 | **不是瓶颈**。boot 阶段一般没有 post 帧，宿主请求后 QEMU 走 `write_latest_ppm` 失败→`getScreenshot` 兜底也失败（stderr 刷 `screenshot: 尺寸探测失败 res=-1`），随即返回，开销≈0 |
+| gfxstream `DO_FINE_LOGGING` | 会打日志，但 boot 阶段 GL 流量还没起来，`qemu-stderr.log` 20 分钟仅 ~0.5MB，不是主因 |
+
+### 21.4 有效改动：guest 内存 4096 → 3072
+
+同一镜像、同一 userdata、同一调试入口，只改 `memoryMb`：
+
+| | 4096MB | 3072MB |
+|---|---|---|
+| guest 时间到 `PackageManagerTiming: create package manager` | **349s** | **257s** |
+| 提速 | — | **1.36x** |
+
+改法：启动 CONFIG 里 `"memoryMb":3072`（`/data/local/tmp/start_vm_cfg_lf.sh`
+或 App 的 `config.json`）。
+
+机理：宿主 `Mem: 11120M total, 10307M used, 812M free` + `Swap: 1963M used` ——
+4GB guest 把 11GB 机器压进了 swap，guest 的每次缺页都变成磁盘 I/O。
+
+### 21.5 还没做、但可能继续受益的
+
+- 继续降 guest 内存（2048MB）—— 但 Android 11 在 2GB 下可能 OOM，需实测。
+- 换一个**把 MTTCG 编进来**的 QEMU 构建（`-accel tcg,thread=multi` 即可生效），
+  这是唯一能"用满 8 核"的路子。
+- guest 侧减轻启动负载（关掉不需要的系统服务），属改镜像的活。
+
 
 
