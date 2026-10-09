@@ -695,6 +695,19 @@ struct qemu_address_space_device_control_ops;
 void qemu_set_address_space_device_control_ops(struct qemu_address_space_device_control_ops* ops);
 }  // extern "C"
 
+// QEMU 侧把「宿主内存映射进访客物理地址空间」的原语（exec/memory-remap.h +
+// exec/cpu-common.h）。goldfish_address_space.c:931 用
+// memory_region_init_ram_user_backed() 建了 area_mem —— 这块 RAM 的宿主内存
+// **不由 QEMU 分配**，必须由 VM ops 的 mapUserBackedRam 补上。
+// TCG 下 qemu_user_backed_ram_map() 会走 exec.c 的 tcg_user_ram_slot_map()
+// （建 memory_region_init_ram_ptr + add_subregion），是可用的实现。
+extern "C" {
+void qemu_user_backed_ram_map(uint64_t gpa, void* hva, uint64_t size, int flags);
+void qemu_user_backed_ram_unmap(uint64_t gpa, uint64_t size);
+}  // extern "C"
+#define VMHOST_UBRAM_FLAGS_READ  0x1
+#define VMHOST_UBRAM_FLAGS_WRITE 0x2
+
 // ---- 地址空间设备需要的 VM operations（aemu 的 sVmOps）----
 // 不接的后果（实测）：guest 发 TELL_PING_INFO 时 aemu 的
 // AddressSpaceDeviceState::tellPingInfo -> sVmOps->physicalMemoryGetAddr() 解引用空表
@@ -705,12 +718,47 @@ static void* vmhost_physical_memory_get_addr(uint64_t gpa) {
     return cpu_physical_memory_map(gpa, &len, 0);
 }
 
+/*
+ * 把一块「宿主内存」映射到访客物理地址 gpa。
+ *
+ * 这是 goldfish 地址空间设备真正拿到可用显存/共享内存的关键一步：aemu 侧
+ * AddressSpaceDeviceState::addMemoryMappingLocked() 分配好宿主内存后调这里，
+ * 期望宿主把 [gpa, gpa+size) 指到 hva。访客 gralloc 走的就是其中的
+ * VirtioGpuGraphics 类型。
+ *
+ * 以前这里是**空桩**，于是 goldfish_address_space.c:931 那个用
+ * memory_region_init_ram_user_backed() 建出来的 area_mem（用户托管 RAM，
+ * used_length 记 0）永远没有宿主内存；访客一访问该区域，QEMU 在 TLB 填充里走
+ * memory_region_get_ram_ptr() -> ramblock_ptr(block, 0) ->
+ * assertion "offset_in_ramblock(block, offset)" failed → SIGABRT。
+ * 实测触发点：访客跑 `screencap`（读 framebuffer → gralloc → 地址空间设备），
+ * 崩前宿主刚用一次 pipe recv 交付了 512KiB（0x80000，典型共享区域大小）。
+ *
+ * 修法 = 上游 android-qemu2-glue/qemu-vm-operations-impl.cpp 的
+ * map_user_backed_ram()：调 QEMU 导出的 qemu_user_backed_ram_map()；TCG 下它走
+ * exec.c 的 tcg_user_ram_slot_map()（memory_region_init_ram_ptr + add_subregion）。
+ * 该操作要改 system_memory 子区域，需持 BQL；用 qemu_mutex_iothread_locked()
+ * 判重避免自死锁（与本文件其它 QEMU 调用一致）。
+ */
 static void vmhost_map_user_backed_ram(uint64_t gpa, void* hva, uint64_t size) {
-    (void)gpa; (void)hva; (void)size;
+    const bool needLock = !qemu_mutex_iothread_locked();
+    if (needLock) qemu_mutex_lock_iothread();
+    qemu_user_backed_ram_map(gpa, hva, size,
+                             VMHOST_UBRAM_FLAGS_READ | VMHOST_UBRAM_FLAGS_WRITE);
+    if (needLock) qemu_mutex_unlock_iothread();
+#ifdef VMHOST_LOG_USER_BACKED
+    vmhost_pipe_log("mapUserBackedRam gpa/size", (long)gpa, (long)size);
+#endif
 }
 
 static void vmhost_unmap_user_backed_ram(uint64_t gpa, uint64_t size) {
-    (void)gpa; (void)size;
+    const bool needLock = !qemu_mutex_iothread_locked();
+    if (needLock) qemu_mutex_lock_iothread();
+    qemu_user_backed_ram_unmap(gpa, size);
+    if (needLock) qemu_mutex_unlock_iothread();
+#ifdef VMHOST_LOG_USER_BACKED
+    vmhost_pipe_log("unmapUserBackedRam gpa/size", (long)gpa, (long)size);
+#endif
 }
 
 static uint64_t vmhost_hostmem_register(const struct MemEntry* entry) {
