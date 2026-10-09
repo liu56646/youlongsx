@@ -17,10 +17,12 @@ data class VmConfig(
     val width: Int = 720,
     val height: Int = 1280,
     val dpi: Int = 320,
-    // 宿主机（测试机）内存只有 11GB，且系统自身常占 ~10GB；-m 4096 时 QEMU 拿不到
-    // 访客内存会卡在早期启动。2048 是当前实测能跑起来的档位。
-    val memoryMb: Int = 2048,
-    val cores: Int = 4,
+    // 实测（真机 cc96ded5，11GB 宿主，见 docs/方案B排障交接.md §21）：
+    // -m 4096 会把宿主压进 swap（系统自身常占 ~10GB），缺页变磁盘 I/O，boot 明显变慢；
+    // 3072 是当前实测最优档位（到 create package manager 提速约 1.36x），2048 有 OOM 风险未采用。
+    val memoryMb: Int = 3072,
+    // 6 vCPU 为设备实测配置；TCG 已开 MTTCG（thread=multi），每个 vCPU 一条宿主线程。
+    val cores: Int = 6,
     val gpuMode: GpuMode = GpuMode.GLES,
     val netMode: NetMode = NetMode.NAT,
     val imageDir: String = "",
@@ -51,8 +53,8 @@ data class VmConfig(
                 width = o.optInt("width", 720),
                 height = o.optInt("height", 1280),
                 dpi = o.optInt("dpi", 320),
-                memoryMb = o.optInt("memoryMb", 2048),
-                cores = o.optInt("cores", 4),
+                memoryMb = o.optInt("memoryMb", 3072),
+                cores = o.optInt("cores", 6),
                 gpuMode = runCatching { GpuMode.valueOf(o.optString("gpuMode", "GLES")) }
                     .getOrDefault(GpuMode.GLES),
                 netMode = runCatching { NetMode.valueOf(o.optString("netMode", "NAT")) }
