@@ -526,3 +526,446 @@ GLES2 直方图（累计 2 万包）：
 建议的探针：**在 `rcBindTexture(cb)` 处采样被绑定那块 CB 的 RGB**（`VMHOST_BLIT src`
 那套 8x8 采样已有现成代码）。若被绑定的图层 CB 里有内容 → 说明"内容在、合成没生效"；
 若也是 0 → 说明访客侧根本没有产出内容（先等它把系统起完再判）。
+
+---
+
+# §15 2026-10-07 夜：SF 的 EGL fatal 根因与已知可用基线
+
+## 15.1 现象
+访客每次启动都在 `SurfaceFlinger::init → RenderEngine::create →
+GLESRenderEngine::create` 处 `LOG_ALWAYS_FATAL("eglQueryStringImplementationANDROID(EGL_VERSION) failed")`，
+init 里 `restart zygote` 级联重启（netd/cameraserver/media 跟着重启），永远到不了
+`sys.boot_completed`，`frame.ppm` 一直不出帧。
+
+## 15.2 根因（已反汇编确认，按因果顺序）
+1. 访客平台 `libEGL.so` 的 `eglQueryStringImplementationANDROIDImpl` **只有一条返回 NULL
+   的路径**：`validate_display()` 失败（`egl_display_t::get()` 为空、或 display 的
+   "已初始化"标志为假）。它**不检查** client extensions。⇒ 真实含义是
+   **访客侧 `eglInitialize` 没成功**（SF 不检查该返回值，直接去查 EGL_VERSION）。
+2. 访客 `libEGL_emulation.so` 的 `eglDisplay::initialize` 失败点：dlopen
+   `libGLESv1_CM_emulation`/`libGLESv2_emulation` → `HostConnection::get()` →
+   `rcEncoder()` → `rcGetEGLVersion()` 必须返回 1。
+3. **今天为修"surfaceless makeCurrent"加的 `MAKECURFIX` 补丁会在这条初始化路径上介入**，
+   使宿主的 `android_startOpenglesRenderer` 直接返回 **-1**（宿主渲染器根本没建起来）。
+   渲染器是死的 → 访客的 EGL 永远连不上 → SF 必然 fatal。
+   **判据（十秒可测）**：宿主 stderr 里
+   `VMHOSTGFX android_startOpenglesRenderer ret=0 gles=3.1`（正常）
+   vs `ret=-1 gles=0.0`（渲染器没起来）。
+4. 同理，`D16`（挂钩 `s_egl.eglMakeCurrent`，surfaceless 且 pbuffer 不可用时退化成
+   "完全不绑上下文"）会制造"该线程没有 current context"，随后任何 GL 调用都会让
+   Adreno 830 驱动解引用 NULL（`LDR x5,[x21,#0x38]`，x21=0）并打死整个 QEMU。
+   崩溃现场 D15 探针会打印 `gl_ctx: eglGetCurrentContext=0x0 ...`。
+
+## 15.3 处置（本次改动）
+- `MAKECURFIX` 默认**不注入**（`VMHOST_MAKECURFIX=0`），源码保留备查；
+- `D16` 不再安装；
+- `D15` 去掉早期 `dlopen("libEGL.so")`（会改变 gfxstream 解析 EGL 符号的优先级）；
+- `D14`（禁用 `getScreenshot` 兜底）保留；
+- 新增可诊断性：rc 握手只读探针、EGL 上下文探针、`VMHOSTPIPE_SVC` 管道日志、崩溃打印 `gl_ctx`；
+- 实例配置降到 `memoryMb=2048 / cores=4`。
+
+## 15.4 已验证的对照与遗留
+- **已知可用基线**：`/data/local/tmp/vmaosp/qemu-system-aarch64`（Oct 5 构建，112MB）。
+  与 App 完全相同的镜像/命令行/环境，`ret=0 gles=3.1`，且跑到 `sys.boot_completed=1`；
+  其镜像里 `eglQueryStringImplementationANDROID` 出现次数为 0。
+  可直接 `cp` 覆盖 App 的 `nativeLibraryDir/libqemu_exec.so`（需 root）做 A/B。
+- **未完成**：① 出帧（post callback 从未被调用，SF 健康时也不 post）；
+  ② 宿主内存：设备 11GB 内存常被系统占用 ~10.4GB，`-m 4096` 时 QEMU 拿不到访客内存，
+  访客会卡在早期启动（表现为宿主 CPU≈0、console 时间戳不动）；降到 2048 才有进展。
+- 本轮改动已本地提交（`8478290`）。本仓库**没有配置 git remote**，上次是用
+  GitHub Git Data API（`api.github.com` + PAT）推送的，推送需沿用该方式。
+
+---
+
+# §16 2026-10-08：**访客终于连续出帧** —— 宿主 SIGSEGV 根因与修复
+
+## 16.1 现象与判据
+访客每次跑到 **SystemUI/SurfaceFlinger 真正开始渲染的那一刻**，宿主 QEMU 进程就
+`signal=11` 被打死，于是：永远走不到 `rcFBPost` / `rcFlushWindowColorBuffer`，
+`VMHOST_POST` / `VMHOST_RCFLUSH` 探针一条都不响，`m_lastPostedColorBuffer` 始终无效，
+`getScreenshot` 恒 `res=-1`。看起来像"访客不提交帧"，实际是**宿主渲染器先崩了**。
+
+崩溃现场（在宿主 stderr 的崩溃转储里）：
+```
+signal=11 si_code=1 addr=0x38 x21=0x0
+pc=<libGLESv2_adreno.so 代码段>
+gl_ctx: eglGetCurrentContext=0x0 eglDrawSurface=0x0 eglReadSurface=0x0
+```
+即 **"该线程没有 current EGL context，却发了 GL 调用"**，Adreno 830 驱动在入口桩里
+解引用 NULL（`LDR x5,[x21,#0x38]`）。
+
+## 16.2 根因链（三条，按因果顺序）
+1. **`EglOsEglDisplay::createPbufferSurface` 被整段注释掉**，恒
+   `return new EglOsEglSurface(PBUFFER, 0)` —— 返回**句柄为 0 的"哑"surface**。
+   访客 SF 会为 GPU 上下文建 pbuffer（`EglImp.cpp: eglCreatePbufferSurface`），拿到
+   句柄 0 之后再 `eglMakeCurrent`，平台侧就退化成 `eglMakeCurrent(dpy, 0, 0, ctx)`。
+   **这是崩点的直接来源**（探针实测：`readSfc=0x..870 rh=0x0 drawSfc=... dh=0x0`）。
+2. `EglOsEglDisplay::makeCurrent` 在 `ctx && !readSfc` 时**直接 `return false`**，
+   把调用线程留在"没有任何绑定"的状态；调用方拿到 false 继续发 GL → 同样崩。
+3. **访客释放上下文后仍继续发 GL**（release 的下一批命令就是 `glUseProgram`），
+   旧实现把宿主绑定清空 → 又落回"无 current context"。
+   另外访客某个渲染线程**从未在本线程做过 `eglMakeCurrent`** 就直接提交命令
+   （实测崩点命令由 **gles1 解码器**消费，见 `VMHOST_GLES1_OP`）。
+
+## 16.3 修复（已脚本化、幂等、可复现）
+新增 `engine/scripts/qemu_patches/patch_vmhost_surface.py`（由 `build_gfxstream.sh`
+的 `5c-bis` 调用），含 4 条编辑：
+- **edit 1**：加固 `EglOsEglDisplay::makeCurrent` —— 缺 surface（或直接绑定失败）时，
+  用 **"先试绑、绑成功才采用"** 的 1x1 pbuffer 顶上。之所以要"试绑成功才采用"：
+  pbuffer 必须与 context 的 config 兼容，否则 `eglMakeCurrent` 返回 `EGL_BAD_MATCH`
+  —— 这正是**旧版内联 MAKECURFIX 补丁**（按 `eglChooseConfig` 自选 config）失败、
+  把 `android_startOpenglesRenderer` 打成 -1 的原因。释放分支改为**绑本线程专属的
+  dummy 上下文**而不是真的解绑。
+- **edit 2**：**恢复 `createPbufferSurface` 的真实实现**（config 取自传入的
+  `PixelFormat`，即访客自己选的那个 `EGLConfig`），创建失败才退回旧行为。
+  实测 9/9 次全部创建成功 → 句柄不再是 0 → 前面那个兜底根本用不上。
+- **edit 3 / 3b**：在 **gles2_dec 与 gles1_dec 的解码循环**里，每条命令前调用
+  `vmhost_mc_ensure_current()`：本线程若没有 current context，就补绑本线程专属
+  dummy（真实驱动在无 current context 时也只是静默报错，**补绑 dummy 与真机语义
+  一致**；有 context 时只读一次 TLS，什么都不做）。
+
+另外把两条**游离在脚本外的手工改动**收进构建流程（`build_gfxstream.sh`）：
+- **step 0a**：`host/gl/OpenGLESDispatch/GLESv2Dispatch.cpp` 每次强制 `git checkout`。
+  它曾被手工改成"优先 `dlsym` 宿主 `libGLESv2.so`"，**绕过了 gfxstream 自己的上下文
+  校验**，把访客 GL 直接打到驱动上 —— 一旦该线程没有 current context 必崩。
+  还原成上游顺序（`::translator::gles2::fn` 优先）后，**剩余的 SIGSEGV 消失**。
+- **5d-bis**：`VMHOST_FORCE_GLES2`（把 maxVersion 压到 `GLES_MAX_VERSION_2`，
+  否则 TextureDraw 的 GLSL 1.0 shader 在 Adreno ES3 上编译失败，`glAttachShader`
+  0x501）从手工改动固化为脚本步骤。
+
+## 16.4 实测结果（真机 cc96ded5 / 实例 vm_1 / 访客 p11_arm64）
+- 宿主 stderr：**`VMHOST QEMU CRASH` 计数 = 0**；`VMHOST_POST = 1873`、
+  `VMHOST_RCFLUSH = 1864`、`screenshot: post-callback` = 632。
+- `android_startOpenglesRenderer ret=0 gles=2.0`；`VMHOST_PBUFSURF ok` = 9（全部成功）。
+- 访客 kernel time 跑到 **876s 仍在运行**（此前 549s / 619s / 631s 必崩），
+  `frame.seq` 持续增长到 **917**（App 侧 `frame.request`/`frame.ppm`
+  回传链路连续工作，`vm_frame_relay.c` 能拿到 P6 帧）。
+- 帧头 `P6 1080 1920`，尺寸正确。
+
+## 16.5 遗留
+1. **帧内容仍基本全黑**：抽检一帧非零像素仅 8751/6220797，且集中在
+   `x=427..1079, y=931..963` 一块 33 行的横条（像一行文字）。
+   这是 §10–§14 记录的独立问题（"渲染的 buffer ≠ 被 post 的 buffer"），
+   与本次崩溃修复无关，需另开一轮。
+2. 宿主内存仍是硬约束：`memoryMb=2048` 才能起来（见 §15.4）。
+
+---
+
+# §17 2026-10-08（二）：黑屏排查 —— **§11 的"post 错 buffer"结论被推翻**，黑屏是访客真实状态
+
+## 17.1 结论先行
+崩溃修好、渲染器健康之后重新测，结论与 §11～§14 相反：
+
+1. **访客 post 的就是它自己合成的结果**，不存在"post 错 buffer"；
+2. **读回链路是准的**（读回统计与交付的 `frame.ppm` 像素完全对得上）；
+3. **黑屏的直接原因是：访客从头到尾没有显示过任何 Activity**
+   （console 里 `ActivityTaskManager: START|Displayed` 计数 = 0）——
+   屏幕上本来就没有东西可显示，不是被宿主丢掉了。
+
+## 17.2 证据链（一次干净运行，真机 cc96ded5 / 实例 vm_1）
+访客的提交序列（`rc` opcode 参数，窗口 surface = 0x9）稳定成环：
+```
+10015 rcSetWindowColorBuffer(ws=0x9, cb=0x8)
+10018 rcFBPost(cb=0xc)
+10016 rcFlushWindowColorBuffer(ws=0x9)
+10015 rcSetWindowColorBuffer(ws=0x9, cb=0xa)   ← 0x8/0xa/0xb 三轮换
+10018 rcFBPost(cb=0xd)
+10016 rcFlushWindowColorBuffer(ws=0x9)
+```
+统计（本次运行）：
+| 事件 | 计数 | 参数 |
+|---|---|---|
+| `rcSetWindowColorBuffer` | 345 / 344 / 344 | 都是 `ws=0x9`，cb = 0x8 / 0xa / 0xb |
+| `rcFlushWindowColorBuffer` | 1034 | 都是 `ws=0x9` |
+| `rcFBPost` | 519 + 518 | cb = 0xc / 0xd |
+| `rcBindTexture` | 18+17+17+7 | cb = 0xb / 0xa / 0x8 / 0xd |
+
+关键在最后一行：**访客把 0x8/0xa/0xb（它渲染进去的那三块）用 `rcBindTexture` 当纹理绑上去**，
+也就是它自己用 GL 把图层采样、合成进 0xc/0xd，然后 post 0xc/0xd。
+所以 **post 的正是合成结果**，`VMHOST_READBACK tex=26/30` 读的也就是这张合成图。
+
+读回与画面的对应（同一时刻）：
+```
+VMHOST_READBACK tex=26 1080x1920 fbo=4 reattach=0 nzRGBpix=2917/2073600 maxRGB=255 err=0x0
+frame.ppm（P6 1080x1920）按像素统计：非零像素 2917  —— 与读回数字**完全一致**
+```
+⇒ 读出准确；画面本身就只有 2917 个非零像素（≈0.14%），集中在屏幕正中
+（`x≈360..720, y≈840..1080`，一块很暗的小斑点）。
+
+## 17.3 §11/§12 的修正
+- §11 记的"`rcFBPost` 的 handle 与 `rcSetWindowColorBuffer` 设置的渲染目标不是同一块"
+  —— 现象是真的，但**结论错了**：那不是 bug，而是访客"图层(0x8/0xa/0xb) →
+  合成(0xc/0xd) → post(0xc/0xd)"的标准两段式，中间那步是 `rcBindTexture` + GL 绘制。
+- §12 的 `VMHOST_HACK_POST_CB`（post 时改用 window surface CB 当像素源）
+  **基于错误前提**，已确认是伪修法；本次已把它从源码树还原（默认不启用）。
+
+## 17.4 黑屏的直接原因
+访客 console（`console.log`）显示：
+```
+[  583.3s] WindowManager: Keyguard drawn timeout. Setting mKeyguardDrawComplete
+[  654.9s] OnBootPhase_600_ActivityTaskManagerService
+[  825.4s] sys.boot_completed=1
+[  895.5s] ssm.onStartUser-0_ActivityTaskManagerService      ← 开始切用户
+[  949.9s] SystemUIBootTiming: DependencyInjection           ← SystemUI 才刚起来
+[ 1022.0s] （console 时间戳到此不再前进）
+```
+`ActivityTaskManager: START` / `Displayed` 计数 **= 0** —— **没有任何 Activity 被启动或显示**。
+即：访客 `boot_completed` 了，但 SystemUI/Launcher 的绘制还没完成，屏幕上就没有内容。
+（TCG 无 KVM 下访客极慢：SystemServer 到 900s 才切用户，期间 539s / 681s 各一次 ANR dump。）
+
+**所以"黑屏"此刻等于"访客还没画出东西"**，不是渲染/回传链路的缺陷。
+早期那种"顶部一条亮带 + 底部一个方框"的帧，是开机动画阶段的正常画面。
+
+## 17.5 新发现：宿主跑约 17 分钟后会崩（另一类崩溃，与 Adreno 无关）
+在 guest ≈1022s（本轮跑了 23 万条 GL 命令）时，宿主又一次 `signal=11`：
+```
+signal=11 si_code=2 addr=0x75c0759000 tid=25891
+pc=0x56b5764c18 lr=0x56b5764c30        ← 都在 libqemu_exec.so 内（不是 adreno）
+gl_ctx: eglGetCurrentContext=0x0 ...
+VMHOST_GLES2_RECENT total=230799        ← 崩溃前已处理 23 万条
+```
+当时用 `llvm-addr2line`（按 `r-xp` 段偏移 0x732000 换算）得到 `aemu BufferQueue::closeLocked()`
+和 emugl `HealthMonitor` 的事件表，据此**猜**成"pipe BufferQueue + HealthMonitor 的堆破坏"。
+
+> **该判断已被证伪 —— 见 §19。** 真正根因是**我们自己的诊断插桩越界读**
+> （`patch_vmhost_diag.py` 注入的 `vmhost_gles2_note()` 按访客自报的 `packetLen`
+> 读参数，越过了命令缓冲区末尾的页边界）。上面这两个符号是"最近符号"式的**误导性归属**：
+> 关键是把 `llvm-nm` 的 **vaddr** 当成了 **file offset**（本 .so 两者差 0x4000）。
+> HealthMonitor 在本工程里根本不会运行（`ENABLE_HEALTH_MONITOR=0`，`CreateHealthMonitor()`
+> 直接返回 `nullptr`，运行时日志固定打 `HealthMonitor disabled.`）。
+
+## 17.6 下一步（按优先级）
+1. ~~修 17.5 的崩溃~~ → **已修，见 §19**（诊断插桩的越界读，已按 `end - ptr` 夹紧并实测通过）。
+2. 让访客真正把 UI 画出来（它太慢）：观察 `Displayed` 出现后再判画面；
+   必要时在 guest 侧关掉重服务（SystemUI/Launcher 之外的）以加速。
+3. 复现脚本化：本次用 `VMHOST_DIAG=1` 运行即可拿到上面所有表格；
+   另注意 `patch_vmhost_diag.py` 里 `vmhost_gles2_note` 的插入锚点已改成短锚点
+   （原先与 `patch_vmhost_surface.py` 的锚点冲突，导致 GLES2 侧全部探针被静默丢掉）。
+
+---
+
+# §18 2026-10-08（三）：访客 UI 显示慢 —— **把 QEMU 钉到大核，实测 1.4x**
+
+## 18.1 结论
+**唯一实测有效的杠杆是「把 QEMU 进程钉到宿主主频最高的核」**，App 路径紧邻 A/B 实测
+**1.43x**（surfaceflinger 147.1s → 102.9s）。其余能想到的加速路径全部被排除：
+KVM 不可用、MTTCG 反而更慢、vCPU 数无影响、访客内存没有抖动。
+
+## 18.2 实测数据
+**A) App 路径、紧邻两次运行（同一镜像/参数，唯一的差别是钉不钉核）**
+
+| 运行 | 钉核 | zygote | surfaceflinger | 当时大核上限 |
+|---|---|---|---|---|
+| A | ✓ cpu6,7 | **53.2s** | **102.9s** | 1.69 GHz（被温控压住） |
+| B | ✗ | 77.4s | **147.1s** | 1.96 GHz |
+
+B 的温控条件**更好**却慢 1.43x ⇒ 钉核收益是实打实的（干净条件下更大）。
+
+**B) 手工 harness（`mt_ab.sh`，不钉核基线 vs 钉核，同参数）**
+
+| 里程碑 | 不钉核 | 钉 cpu6,7 |
+|---|---|---|
+| servicemanager | 26.0s | 19.0s |
+| zygote | 75.8s | 53.4s |
+| surfaceflinger | 154.4s | 104.1s |
+
+**C) 宿主拓扑（8 Gen 3）**：cpu0–5 = 3.53GHz，**cpu6/7 = 4.32GHz**。
+
+## 18.3 排除掉的路径（都实测过）
+| 路径 | 结果 |
+|---|---|
+| **KVM** | 不可用。内核 `CONFIG_KVM=y`（`kvm-arm.mode=protected`），但 `/proc/misc` 里没有 kvm、手工 `mknod /dev/kvm c 10 232` 后 `dd` 报 **No such device** —— 设备跑在 Qualcomm **Gunyah**（`/sys/class/misc/gunyah`）之下、内核在 EL1，KVM 无法初始化。 |
+| **MTTCG**（`-accel tcg,thread=multi`） | **更慢**：同条件对照 SF 96s→135s，且 CPU 始终 ~107%（从未 >1 核）。 |
+| **vCPU 数**（`-smp 2` vs `4`） | 无影响（SF 153.5s vs 154.4s）。⇒ 访客启动基本是**单线程**的，多核/多线程 TCG 都是白亏同步开销。 |
+| **访客内存** | 无抖动迹象（console 里 `lmkd` 无杀进程、无 `am_kill`）。 |
+| **`performance` governor** | 在温控下**无效甚至更慢**（温控把 `scaling_max_freq` 压到 1.69GHz，硬件上限 4.32GHz）。 |
+
+## 18.4 关键认知：访客速度几乎线性跟随宿主**实际主频**
+- 手工跑（root shell 子进程、后台调度）比 App 跑（前台 app 子进程、有 boost）
+  慢 ~1.6x —— 同样的镜像与参数；根因就是调度/主频不同。
+- 因此**跨时段对比不可靠**，调优必须紧邻 A/B。为此新增了
+  `vm/build-aosp-exp/mt_ab.sh`（按 App 完全相同的参数手工起 QEMU，里程碑直接读访客
+  内核时间戳，`taskset c0` 可指定亲和）。
+
+## 18.5 落点（不用重打 APK）
+引擎 spawn QEMU 时**只** `LD_PRELOAD` 了 `libsigfix.so`
+（见 `vm/engine/src/main/cpp/src/vm_qemu.c:340`），所以它是唯一"给 QEMU 子进程加启动
+修正"的注入点。在 `vm/build-aosp-exp/libsigfix.c` 里新增 `VMHOST_PIN`：
+- 构造函数里逐核读 `cpuN/cpufreq/cpuinfo_max_freq`，**取主频最高的一组**（本机 = 6,7），
+  调 `sched_setaffinity`；线程继承掩码，一次即覆盖 QEMU 全部线程；
+- 读不到主频就**不干预**；`VMHOST_PIN_CPUS=<hex 掩码>` 可手工指定，`=0` 关闭（A/B 用）；
+- 启动时在 stderr 打一行 `VMHOST_PIN 已把 QEMU 钉到主频最高的核：6,7` 便于确认。
+
+编译：`vm/build-aosp-exp/build_sigfix.sh`（NDK clang，产物已更新到
+`vm/engine/src/main/jniLibs/arm64-v8a/libsigfix.so`）；设备上替换
+`nativeLibraryDir/libsigfix.so` 即可生效。
+
+## 18.6 遗留（要做"秒开"还差什么）
+钉核只把 ~14min 的启动压到 ~10min，量级没变。要真正快，只有两条结构性路线：
+1. **削减访客的启动工作量**（镜像级）：访客自身计时显示 `Zygote64Timing: PreloadClasses`
+   单项就要 22–35s；SystemServer/SystemUI 是后段大头（`boot_completed` 前后），
+   需要按服务裁剪或换更精简的镜像；
+2. **快照/恢复**（QEMU `savevm`/`loadvm`）：启动一次后保存，之后秒级恢复 ——
+   收益最大，但 gfxstream/Virtio 设备的状态保存是主要风险点，属独立大工程。
+
+## 19. 2026-10-09：§17.5「跑约 17 分钟必崩」真正根因 —— 是**我们自己的诊断插桩越界读**
+
+### 19.1 结论先行
+不是 HealthMonitor、不是 gfxstream、不是 Adreno。是 `patch_vmhost_diag.py` 注入的
+`vmhost_gles2_note()` 在 GLES2 解码循环里**读越界**：
+
+它按**访客自报**的 `packetLen` 去读命令参数（`p + 8 + 4*i`），而缓冲区末尾那个包
+**只到一半**是常态（命令缓冲被拆包，`decode()` 处理不完就返回让调用方补数据），
+此时 `packetLen > end - ptr`，于是读到缓冲区之外；当缓冲区末尾恰好落在**页边界**
+（scudo secondary 分配后面的 guard page）时 → `SIGSEGV si_code=2`（ACCERR，读只读页）
+把整个 QEMU 打死。所以表现为"特定阶段必崩"，且与访客/驱动无关。
+
+### 19.2 证据链（日志行 460175 那次，`VMHOST_GLES2_RECENT total=289572`）
+```
+signal=11 si_code=2 addr=0x70007df000
+pc=0x5a597b5214 lr=0x5a597b522c   x21=0x8   x25=0xb4000070007deff8（= ptr+8）
+```
+- **换算**：本 .so 的 ELF 是 `p_offset=0x7326d0` / `p_vaddr=0x7366d0`（差 0x4000），
+  所以 `file_off = (pc - self_base) - 0x4000`，即 **0xcd5214**。
+- **反汇编（vaddr 0xcd5214）**：
+  ```
+  cd91ec: add  x25, x1, #0x8      ; x25 = ptr + 8
+  cd9214: ldr  w5, [x25, x21]     ; ← 崩溃指令：*(uint32_t*)(ptr + 8 + 4*i)
+  cd9228: bl   snprintf
+  ```
+  x25(0xb4000070007deff8) + x21(8) = 0x70007df000，与 `addr` 逐位吻合。
+- **与注入代码逐字对应**：`mov w26, #0xa0`(=160) 即 `sizeof(args)`，`bl snprintf` 即
+  ```cpp
+  char args[160] = {0};  int n = 0;
+  for (int i = 0; i < 7; i++) {
+      if (len < (uint32_t)(12 + 4 * i)) break;                 // len = 访客自报 packetLen
+      n += snprintf(args + n, sizeof(args) - n, " a%d=0x%x",
+                    i, *(const uint32_t*)(p + 8 + 4 * i));     // ← 越界读
+  }
+  ```
+- **为什么 `len` 会大于实际剩余**：上游的真正校验在**我们这行之后**
+  ```cpp
+  uint32_t packetLen = *(uint32_t *)(ptr + 4);
+  vmhost_gles2_note(opcode, packetLen, ptr);                     /* 我们插的 */
+  if (end - ptr < packetLen) return ptr - (unsigned char*)buf;   /* 上游真正的校验 */
+  ```
+
+### 19.3 为什么上一轮的 HealthMonitor 判断是错的
+- 本工程 `ENABLE_HEALTH_MONITOR` **从未定义**（=0）：编出来的 `libqemu_exec.so` 里
+  `CreateHealthMonitor()` 就是
+  `OutputLog("HealthMonitor disabled."); *out = nullptr;`（一行直接返回）。运行时同样印证：
+  每次 QEMU 启动都打 `HealthMonitor.cpp:280] HealthMonitor disabled.`。
+  ⇒ **根本不存在 HealthMonitor 实例**（`m_healthMonitor == nullptr`），监控线程也从不启动。
+- 因此 `patch_vmhost_healthmon.py`（**已删除**）与 `FrameBuffer` 的 `m_healthMonitor(nullptr)`
+  都是空操作 —— 既不引发、也修不掉这个崩溃。这与"打完补丁 pc 只差 0x10、x0 一样"完全吻合：
+  pc 只是**确定性落点**，不是肇事者。
+- **误判来源**：把 `llvm-nm` 的 **vaddr** 当成了 **file offset**（混用 0xcd5224 / 0xcd5214），
+  正好落进 `HealthMonitor<steady_clock>::main()::lambda(Stop&)` 的地址区间，才"撞"上库里那段无关代码。
+
+### 19.4 修法（已落地）
+`patch_vmhost_diag.py`：解码循环调用点先算 `avail = end - ptr`，传 `min(packetLen, avail)`；
+并自愈旧版（未夹紧）注入。
+```cpp
+const uint32_t vmhostAvail = (uint32_t)(end - ptr);
+vmhost_gles2_note(opcode, packetLen < vmhostAvail ? packetLen : vmhostAvail, ptr);
+```
+这样 `note()` 里所有读取都满足 `12 + 4*i <= len <= avail`，恒在 `[ptr, end)` 内。
+反汇编确认新 `libqemu_exec.so` 已生成夹紧：`cmp w8,w28` + `csel w19,w8,w28,lo`。
+
+> 同时修了 `patch_vmhost_diag.py` 里同一个坑的另一处隐患：`vmhost_gles2_note` 之外
+> 没有第二处"按自报长度读参数"的插桩（gles1 侧只打印 opcode/len，且 unpack 在
+> 上游校验之后），所以这一处就是唯一的肇事点。
+
+### 19.5 实测（真机 cc96ded5 / vm_1 / p11_arm64 / 720x1280 / 4096MB / 6 核）
+| | 旧构建 | 新构建 |
+|---|---|---|
+| 崩溃 | `VMHOST_GLES2_RECENT total=289572` 处 `signal=11 si_code=2` | **无** |
+| 崩溃标记计数（本次运行区间） | 1 | **0** |
+| GL 命令数 | 卡死在 289572 | 越过 **400000** 持续增长 |
+| QEMU 进程 | 亡 | **存活**（17:32 仍在跑，正是过去必崩的时刻） |
+
+复现方式：App 的调试入口 `com.vm.app/.instance.VmNativeActivity1`
+（`--es com.vm.core.extra.CONFIG <json>`），比手工 `mt_ab.sh` 更忠实
+（手工 harness 会卡在 boot 早期、根本走不到 GL 流量）。
+
+### 19.6 提醒（避免重犯）
+- 解析崩溃地址时，**先看 ELF 的 `p_offset` 与 `p_vaddr` 是否相等**再决定喂给
+  `llvm-nm` / `llvm-objdump --start-address` 的数值：本 .so 两者差 0x4000，且
+  `llvm-nm -S` 打印的是 **vaddr**。混用会把 pc 归到完全无关的函数上。
+- **在解码/解析类循环里插桩，读参数的边界必须用"缓冲区真实剩余"（`end - ptr`），
+  绝不能用报文里自报的长度** —— 后者可能超出缓冲区。
+
+## 20. 2026-10-09（二）：访客 UI 出来后**画面上下颠倒** —— post callback 多翻了一次
+
+### 20.1 现象
+
+装机复现后访客 UI 确实出来了（宿主上能看到 `Phone is starting`），但**整幅画面
+上下颠倒**。注意：左右顺序是**正常**的（`P` 在最左、`g` 在最右），所以不是 180° 旋转，
+而是纯垂直翻转。
+
+### 20.2 根因
+
+`vmhost_gfx_glue.cpp` 的 `vmhost_gfx_on_post()`（`Renderer::setPostCallback` 的回调）
+按 `ydir < 0` 做了一次垂直翻转，注释写的是「ydir=-1 表示 bottom-to-top（GL 约定），
+这里翻成 top-to-bottom 存」。
+
+**但 gfxstream 这次回调传进来的 `pixels` 本来就是 top-to-bottom。** 实测打印：
+
+```
+VMHOSTGFX post callback ydir=-1 1080x1920 fmt=6408 type=5121（按 top-down 原样使用）
+```
+
+于是那一翻把帧变回 bottom-up，再按 PPM 约定（第一行=顶部）写进 `frame.ppm`，就颠倒了。
+
+宿主侧其实是**直传**，`frame.ppm` 怎么放就怎么显示：
+
+- `vm_frame_relay.c`：按 top-down 读 PPM 到 `s_pixels`（`s_pixels[0]` = PPM 第一行）
+- `vm_guest_display.c`：`glTexImage2D(..., s_pixels)` —— GL 里 `data[0]` 落在 `t=0`（纹理底部）
+- `vm_render.c`：屏幕**顶部**用 `v=0` → 采到 `s_pixels[0]`
+
+串起来就是「`s_pixels[0]` → 屏幕顶部」。所以只要 `frame.ppm` 是倒的，屏幕就是倒的 ——
+**宿主这一段没有错，错在 QEMU 侧那一翻**。
+
+### 20.3 证据链
+
+1. **位置镜像**（最硬）：旧 `frame.ppm` 里文字亮带在 `y≈968–984`；修掉翻转后，
+   同一界面的文字落到 `y≈932–950`。`1920 - 976 = 944`，正是镜像位置。
+2. **字形朝向**：字符画里首字母 `P` 的圈从「在下半部」变成「在上半部」，
+   结尾 `g` 的降部从朝上变成朝下。
+3. **横向未翻**：`P` 始终在最左、`g` 在最右 ⇒ 是垂直翻转，不是 180°。
+4. **宿主端同源**：同一次运行的宿主截图（1200x2670）里 `g` 的降部同样朝下。
+
+> 判定朝向不需要看图工具：把 PNG/PPM 按区域缩成 ASCII 字符画，看
+> **首字母 `P` 的圈在上还是在下**、**结尾 `g` 的降部朝向**即可 ——
+> 这两处对上下最敏感（圈是半高块，降部是唯一伸出主体行的向下笔画）。
+
+### 20.4 修法（已落地）
+
+`vm/engine/scripts/qemu_patches/vmhost_gfx_glue.cpp`：`vmhost_gfx_on_post()` 改为
+**原样拷贝**，不再按 `ydir` 翻转；`ydir` 只打一次日志便于复核。
+
+```c
+memcpy(s_latest_pixels.data(), pixels, need);
+```
+
+### 20.5 实测（真机 cc96ded5 / vm_1 / p11_arm64）
+
+| | 修前 | 修后 |
+|---|---|---|
+| `frame.ppm` 文字位置 | y≈976 | y≈944（镜像） |
+| 首字母 `P` 的圈 | 在下半部 | **在上半部** |
+| 结尾 `g` 降部 | 朝上 | **朝下** |
+| 宿主截图 | 倒置 | **正立** |
+
+重装机流程：`build_qemu_aosp.sh`（新 `.so` 113964952 字节，比旧的多 136 字节 =
+新增日志串）→ `:app:assembleDebug` → `adb install -r` → 调试入口启动。
+
+### 20.6 提醒
+
+- 别把「GL 纹理原点在左下」当成"进来的数据都得翻一次"：要不要翻取决于
+  **上游写出的字节顺序**，这次上游给的就是 top-down。
+- `frame.ppm` 既是排障资产又是显示源，朝向必须与 PPM 约定一致。
+  在宿主 shader 里"补翻"能修显示，但会让排障资产继续骗人 —— 那是错误的位置。
+
+
+

@@ -470,15 +470,25 @@ static int s_latest_h = 0;
 static unsigned long long s_latest_seq = 0;
 
 // Renderer::OnPostCallback 签名：每次帧显示前回调，pixels 为帧内容拷贝。
-// 注意 ydir=-1 表示 bottom-to-top（GL 约定），这里翻成 top-to-bottom 存。
+//
+// VMHOST_FIX（朝向）：实测 gfxstream 这次回调传进来的 pixels **已经是
+// top-to-bottom**（pixels[0] 就是图像顶部的第一行）。此前按 ydir<0 又翻了一次，
+// 于是 s_latest_pixels 变成 bottom-up 写进 frame.ppm；宿主按 PPM 的 top-down
+// 约定读走，画面就上下颠倒了（实测访客 "Phone is starting" 在宿主上倒置：
+// 字母 P 的圈朝下、结尾 g 的降部朝上，而左右顺序正常）。这里改成原样拷贝，
+// ydir 只打一次日志便于复核。
 static void vmhost_gfx_on_post(void* ctx, uint32_t displayId, int width, int height,
                                int ydir, int format, int type,
                                unsigned char* pixels) {
     (void)ctx;
-    (void)format;
-    (void)type;
     if (displayId != 0 || !pixels || width <= 0 || height <= 0) {
         return;
+    }
+    static bool s_logged_ydir = false;
+    if (!s_logged_ydir) {
+        s_logged_ydir = true;
+        vmhost_gfx_log("post callback ydir=%d %dx%d fmt=%d type=%d（按 top-down 原样使用）",
+                       ydir, width, height, format, type);
     }
     std::lock_guard<std::mutex> lk(s_latest_mutex);
     const size_t row = (size_t)width * 4u;
@@ -486,14 +496,7 @@ static void vmhost_gfx_on_post(void* ctx, uint32_t displayId, int width, int hei
     if (s_latest_pixels.size() != need) {
         s_latest_pixels.resize(need);
     }
-    if (ydir < 0) {
-        for (int y = 0; y < height; y++) {
-            memcpy(s_latest_pixels.data() + (size_t)y * row,
-                   pixels + (size_t)(height - 1 - y) * row, row);
-        }
-    } else {
-        memcpy(s_latest_pixels.data(), pixels, need);
-    }
+    memcpy(s_latest_pixels.data(), pixels, need);
     s_latest_w = width;
     s_latest_h = height;
     s_latest_seq++;
