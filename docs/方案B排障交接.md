@@ -967,20 +967,29 @@ memcpy(s_latest_pixels.data(), pixels, need);
 - `frame.ppm` 既是排障资产又是显示源，朝向必须与 PPM 约定一致。
   在宿主 shader 里"补翻"能修显示，但会让排障资产继续骗人 —— 那是错误的位置。
 
-## 21. 2026-10-09（三）：访客"太慢" —— 单线程 TCG 是硬限制，内存换 swap 是最大杠杆
+## 21. 2026-10-09（三）：访客"太慢" —— MTTCG 本来就开着，瓶颈是「boot 串行 + TCG 吞吐」和内存换页
 
-### 21.1 结论先行
+### 21.1 结论先行（含一次自我纠错）
 
-1. **根本限制**：本机没有 KVM（内核 EL1，无 `/dev/kvm`），QEMU 只能纯软件
-   模拟（TCG）；而**本仓这版 QEMU 的 TCG 是单线程的** —— 6 个 vCPU 全挤在
-   **1 个宿主线程**上轮转，宿主 8 核只用到 ~1 核。这是"慢"的主因，且无法靠
-   调参绕过。
-2. **最大可落地杠杆是内存**：guest 由 4096MB 降到 3072MB，实测**启动推进速度
+> **纠错**：本节初稿断言的「该构建没把 MTTCG 编进来、TCG 只能单线程」
+> **是错的**。回到源码与构建产物核对后确认：**MTTCG 是开启的**，QEMU 确实
+> 给每个 vCPU 建了独立线程（证据见 21.2）。之所以 `top` 里只看到一个核在忙，
+> 是因为 **guest 在 boot 阶段的工作本身就是串行的**，不是 QEMU 不能并行。
+> 教训：判断 TCG 是否多线程，要看 **vCPU 线程条数 / 源码分支**，
+> **不能**看 CPU 占用分布 —— 占用分布只反映 guest 当下的负载形状。
+
+1. **能多线程，而且是开着的**（见 21.2）。
+2. **"慢"来自两处，都与线程数无关**：
+   - **guest boot 流程天然串行**：init 逐个起服务、PackageManager 在主线程扫包，
+     整段只有一个 vCPU 有活干 —— 此刻就算有 6 条 vCPU 线程也只用的上 1 条。
+   - **TCG 是软件模拟**（没有 KVM，内核 EL1）：单核翻译执行的吞吐只有 native
+     的十几分之一，这是天花板。
+3. **最大可落地杠杆仍是内存**：guest 由 4096MB 降到 3072MB，实测**启动推进速度
    提升 1.36x**（见 21.4）。原因是宿主总内存 11GB 被 4GB guest 挤到
    **swap 已用 2GB**，guest 每次缺页都变成磁盘 I/O。
-3. 帧回传、诊断日志**都不是**瓶颈（见 21.3）。
+4. 帧回传、诊断日志**都不是**瓶颈（见 21.3）。
 
-### 21.2 证据：TCG 确实是单线程
+### 21.2 证据：MTTCG 是开着的（初稿在这里判断反了）
 
 `top -H`（guest 已进 userspace，iorapd / PackageManager 在跑）：
 
@@ -992,14 +1001,25 @@ memcpy(s_latest_pixels.data(), pixels, need);
 16453 ... S 1.7
 ```
 
-CPU 全部集中在 1 个线程（100%），其余线程近乎空闲 —— 单线程 TCG 下每个 vCPU
-线程都在抢同一把全局锁，`-smp 6` 只改变 guest 看到的核数，不带来并行。
+CPU 集中在 1 个线程，其余 vCPU 线程近乎空闲。**但这不等于"只有一条 vCPU
+线程"** —— 它只说明"这一刻只有 1 个 vCPU 有活干"。若真是单线程 TCG，QEMU 只会
+建 **1 条** vCPU 线程、让其余 vCPU 复用它（`cpus.c: qemu_tcg_init_vcpu()` 的
+`else` 分支「share a single thread for all cpus」）。
+
+四条证据说明 MTTCG 是开着的：
+
+| 环节 | 事实 |
+|---|---|
+| target 是否被标记为支持 MTTCG | `qemu-aosp-build-arm64-v8a/aarch64-softmmu/config-target.mak:9` → **`TARGET_SUPPORTS_MTTCG=y`**（`configure` 的 `aarch64\|aarch64_be)` 分支里写了 `mttcg="yes"`） |
+| 命令行是否真把它打开 | `cpus.c: qemu_tcg_configure()`：`-accel tcg,thread=multi` 命中 `strcmp(t,"multi")==0` → **`mttcg_enabled = true`**；且因 `TARGET_SUPPORTS_MTTCG` 已定义，**不会**打印 "Guest not yet converted to MTTCG" 警告 —— 与实测（无警告）完全一致 |
+| 是否真做到每 vCPU 一线程 | `cpus.c: qemu_tcg_init_vcpu()`：`if (qemu_tcg_mttcg_enabled()) { parallel_cpus = true; qemu_thread_create(...) }` |
+| 运行时线程 | QEMU 子进程内存在 6 条连续 tid 的线程（16451–16456），与 `-smp 6` 一一对应 |
 
 ### 21.3 试过但此路不通
 
 | 尝试 | 结果 |
 |---|---|
-| `-accel tcg,thread=multi` | **被接受、不报错，但实测无效**：线程分布仍是单个 100%，其余 1.7%。该构建未把 MTTCG 编进来 |
+| 「只有 1 个线程 96% ⇒ MTTCG 没编进来」 | **错误推论**（本节初稿的结论，已更正）。boot 阶段 guest 本来就串行；判据要看 vCPU 线程条数 / 源码分支，不能看 CPU 占用分布 |
 | `-accel tcg,thread=multi,tb-size=256` | QEMU **直接启动失败**：`Invalid parameter 'tb-size'`，`子进程 QEMU 正常退出，code=1`。本仓 QEMU 的 `-accel` 实现约当 2.10，那时 tb-size 还没进 tcg accel |
 | 帧回传走文件是否拖慢 | **不是瓶颈**。boot 阶段一般没有 post 帧，宿主请求后 QEMU 走 `write_latest_ppm` 失败→`getScreenshot` 兜底也失败（stderr 刷 `screenshot: 尺寸探测失败 res=-1`），随即返回，开销≈0 |
 | gfxstream `DO_FINE_LOGGING` | 会打日志，但 boot 阶段 GL 流量还没起来，`qemu-stderr.log` 20 分钟仅 ~0.5MB，不是主因 |
