@@ -357,6 +357,17 @@ else
         echo "!! VMHOST_MAKECURFIX/VMHOST_PBUFSURF 补丁失败" >&2; exit 1; }
 fi
 
+# 5c-ter) 【已删除】VMHOST_NOMONITOR（不创建 emugl::HealthMonitor）。
+#         曾经以为 §17.5「跑约 17 分钟必崩」是 HealthMonitor 的 use-after-free，
+#         后来实测证伪：本工程 ENABLE_HEALTH_MONITOR 从未定义（=0），
+#         `CreateHealthMonitor()` 在编出来的 libqemu_exec.so 里就是
+#         `OutputLog("HealthMonitor disabled."); *out = nullptr;`（一行直接返回），
+#         所以根本不存在 HealthMonitor 实例、监控线程也从不启动。
+#         真正的根因见 patch_vmhost_diag.py 的 GLES2 调用点注释与
+#         docs/方案B排障交接.md §19：是诊断插桩在解码循环里按访客自报的 packetLen
+#         读参数，越过了命令缓冲区末尾（页边界 guard page）。
+#         对应的 patch_vmhost_healthmon.py 已删除。
+
 # 5d) VMHOST_EGLSTRING：补齐宿主对 EGL_VENDOR / EGL_EXTENSIONS 的回答。
 #     访客侧 libEGL_emulation.so 的 eglDisplay::queryString 对这三个名字会走
 #     HostConnection → rcEncoder → rcGetGLString(name, buf, size)（反汇编确认）：

@@ -149,33 +149,50 @@ int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
 
 static void vmpin_apply(void) {
     const char *env = getenv("VMHOST_PIN_CPUS");
-    cpu_set_t set;
-    CPU_ZERO(&set);
+    cpu_set_t allowed;
+    cpu_set_t want;
+    CPU_ZERO(&allowed);
+    CPU_ZERO(&want);
+
+    /*
+     * 先读**本进程当前允许**的核。App 在前台/后台会被 Android 放进不同的 cpuset，
+     * 后台 cpuset 里可能根本没有大核 —— 那样直接 sched_setaffinity({6,7}) 会返回
+     * EINVAL（实测踩到过）。所以只在"允许集合"里挑，拿不到理想子集就退而求其次。
+     */
+    if (sched_getaffinity(0, sizeof(allowed), &allowed) != 0) {
+        CPU_ZERO(&allowed);
+        for (int i = 0; i < VMPIN_MAX_CPU; i++) {
+            CPU_SET(i, &allowed);
+        }
+    }
 
     if (env != NULL) {
-        unsigned long mask = strtoul(env, NULL, 16);
+        const unsigned long mask = strtoul(env, NULL, 16);
         if (mask == 0UL) {
             fprintf(stderr, "VMHOST_PIN 关闭（VMHOST_PIN_CPUS=0）\n");
             return;
         }
         for (int i = 0; i < VMPIN_MAX_CPU; i++) {
-            if ((mask >> i) & 1UL) {
-                CPU_SET(i, &set);
+            if (((mask >> i) & 1UL) && CPU_ISSET(i, &allowed)) {
+                CPU_SET(i, &want);
             }
         }
     } else {
         long freq[VMPIN_MAX_CPU];
         long best = -1;
-        int n = (int)sysconf(_SC_NPROCESSORS_ONLN);
+        const int n = (int)sysconf(_SC_NPROCESSORS_ONLN);
         if (n <= 0 || n > VMPIN_MAX_CPU) {
             return;
         }
         for (int i = 0; i < n; i++) {
+            freq[i] = -1;
+            if (!CPU_ISSET(i, &allowed)) {
+                continue;   /* 不在允许集合里，读主频也没意义 */
+            }
             char path[128];
             long v = -1;
             snprintf(path, sizeof(path),
                      "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", i);
-            freq[i] = -1;
             FILE *fp = fopen(path, "r");
             if (fp != NULL) {
                 if (fscanf(fp, "%ld", &v) == 1) {
@@ -192,17 +209,22 @@ static void vmpin_apply(void) {
         }
         for (int i = 0; i < n; i++) {
             if (freq[i] == best) {
-                CPU_SET(i, &set);
+                CPU_SET(i, &want);
             }
         }
     }
 
-    if (sched_setaffinity(0, sizeof(set), &set) == 0) {
+    if (CPU_COUNT(&want) == 0) {
+        fprintf(stderr, "VMHOST_PIN 允许集合内没有可用核，跳过\n");
+        return;
+    }
+
+    if (sched_setaffinity(0, sizeof(want), &want) == 0) {
         char cpus[224];
         int off = 0;
         cpus[0] = '\0';
         for (int i = 0; i < VMPIN_MAX_CPU && off < (int)sizeof(cpus) - 8; i++) {
-            if (CPU_ISSET(i, &set)) {
+            if (CPU_ISSET(i, &want)) {
                 off += snprintf(cpus + off, sizeof(cpus) - (size_t)off, "%s%d",
                                 off ? "," : "", i);
             }

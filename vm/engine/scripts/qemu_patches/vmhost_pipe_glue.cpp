@@ -13,7 +13,9 @@
 // 用空实现——本工程不使用 QEMU save/load 快照，这些回调不会被触发。
 
 #include <arpa/inet.h>
+#include <dlfcn.h>
 #include <fcntl.h>
+#include <link.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -778,6 +780,64 @@ static bool vmhost_crash_peek(uint64_t addr, uint64_t *out) {
 }
 
 /*
+ * 批量安全读（同样走 process_vm_readv，坏地址只会短读/失败）。扫栈用：
+ * 逐 8 字节 peek 太慢，按 1KB 块读一次然后内存里扫。
+ */
+static ssize_t vmhost_crash_read_block(uint64_t addr, void *buf, size_t len) {
+    if (addr == 0 || addr < 4096) {
+        return 0;
+    }
+    struct iovec local = { buf, len };
+    struct iovec remote = { (void *)(uintptr_t)addr, len };
+    return syscall(SYS_process_vm_readv, getpid(), &local, 1, &remote, 1, 0);
+}
+
+/*
+ * 本模块（libqemu_exec.so）可执行段的地址范围与对应文件偏移。
+ * 为什么需要：aarch64 上 fp-walk **不可靠**（gfxstream 用 -O2 编译、不保证保留
+ * 帧指针），所以真正的调用链只能靠"扫栈里落在本模块代码段内的返回地址"来还原。
+ * 预先（安装 handler 时）算好范围，崩溃时才不会在信号上下文里做复杂事。
+ */
+static uint64_t s_self_base = 0;
+static uint64_t s_self_code_lo = 0;
+static uint64_t s_self_code_hi = 0;
+static uint64_t s_self_code_off = 0;   /* s_self_code_lo 对应的文件偏移 */
+
+static int vmhost_crash_phdr_cb(struct dl_phdr_info *info, size_t size, void *data) {
+    (void)size;
+    (void)data;
+    if ((uint64_t)info->dlpi_addr != s_self_base) {
+        return 0;
+    }
+    for (int i = 0; i < info->dlpi_phnum; i++) {
+        const ElfW(Phdr) *ph = &info->dlpi_phdr[i];
+        if (ph->p_type != PT_LOAD || !(ph->p_flags & PF_X)) {
+            continue;
+        }
+        const uint64_t lo = s_self_base + (uint64_t)ph->p_vaddr;
+        const uint64_t hi = lo + (uint64_t)ph->p_memsz;
+        if (s_self_code_lo == 0 || lo < s_self_code_lo) {
+            s_self_code_lo = lo;
+            s_self_code_off = (uint64_t)ph->p_offset;
+        }
+        if (hi > s_self_code_hi) {
+            s_self_code_hi = hi;
+        }
+    }
+    return 1;
+}
+
+static void vmhost_crash_init_self_range(void) {
+    Dl_info dli;
+    memset(&dli, 0, sizeof dli);
+    if (dladdr((void *)(uintptr_t)&vmhost_crash_peek, &dli) != 0 &&
+        dli.dli_fbase != nullptr) {
+        s_self_base = (uint64_t)(uintptr_t)dli.dli_fbase;
+        dl_iterate_phdr(vmhost_crash_phdr_cb, nullptr);
+    }
+}
+
+/*
  * VMHOST_DIAG: 由 gles2_dec.cpp 提供，打印崩溃前最后 64 条 GLES2 命令。
  * 用弱符号：万一分发库/链接顺序里没有这个符号，也不会导致链接失败。
  */
@@ -889,6 +949,49 @@ static void vmhost_crash_handler(int sig, siginfo_t *si, void *ucp) {
     }
     vmhost_crash_w("--- end backtrace ---\n");
 
+    /*
+     * 扫栈还原真实调用链：aarch64 上 fp-walk 常因 -O2 丢了帧指针而断链，
+     * 而**返回地址一定在栈上**。这里从 sp 起扫 64KB，把落在本模块可执行段内的
+     * 8 字节值全部打出来，并直接给出 addr2line 可用的文件偏移。
+     */
+    if (s_self_code_lo != 0 && sp != 0) {
+        snprintf(buf, sizeof buf,
+                 "self_base=0x%llx code=0x%llx..0x%llx code_off=0x%llx\n",
+                 (unsigned long long)s_self_base,
+                 (unsigned long long)s_self_code_lo,
+                 (unsigned long long)s_self_code_hi,
+                 (unsigned long long)s_self_code_off);
+        vmhost_crash_w(buf);
+        vmhost_crash_w("--- stack scan (本模块代码地址) ---\n");
+        const uint64_t scan_end = sp + (64u << 10);
+        uint64_t a = sp & ~7ULL;
+        int shown = 0;
+        while (a < scan_end && shown < 48) {
+            uint64_t blk[128];   /* 1KB */
+            const ssize_t n = vmhost_crash_read_block(a, blk, sizeof blk);
+            if (n <= 0) {
+                a += sizeof blk;
+                continue;
+            }
+            for (ssize_t k = 0; k + 8 <= n && shown < 48; k += 8) {
+                const uint64_t v = *(const uint64_t *)((const char *)blk + k);
+                const uint64_t m = v & 0x00FFFFFFFFFFFFFFULL;   /* 去 TBI */
+                if (m >= s_self_code_lo && m < s_self_code_hi) {
+                    snprintf(buf, sizeof buf,
+                             "  sp+0x%-7llx 0x%llx file_off=0x%llx\n",
+                             (unsigned long long)(a + (uint64_t)k - sp),
+                             (unsigned long long)m,
+                             (unsigned long long)(s_self_code_off +
+                                                  (m - s_self_code_lo)));
+                    vmhost_crash_w(buf);
+                    shown++;
+                }
+            }
+            a += (uint64_t)n;
+        }
+        vmhost_crash_w("--- end stack scan ---\n");
+    }
+
     /* VMHOST_DIAG: 崩溃前最后 64 条 GLES2 命令 —— 就是把这串调用打崩的驱动 */
     if (vmhost_gles2_dump_recent) {
         vmhost_gles2_dump_recent();
@@ -920,6 +1023,8 @@ static void vmhost_crash_handler(int sig, siginfo_t *si, void *ucp) {
 }
 
 static void vmhost_install_crash_handler(void) {
+    /* 先把本模块代码段范围算好，崩溃时才能靠扫栈还原调用链 */
+    vmhost_crash_init_self_range();
     vmhost_crash_fd =
             open("/data/local/tmp/qemu_crash.log", O_WRONLY | O_CREAT | O_APPEND, 0666);
     if (vmhost_crash_fd < 0) {

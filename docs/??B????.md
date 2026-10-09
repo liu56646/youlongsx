@@ -724,21 +724,18 @@ pc=0x56b5764c18 lr=0x56b5764c30        ← 都在 libqemu_exec.so 内（不是 a
 gl_ctx: eglGetCurrentContext=0x0 ...
 VMHOST_GLES2_RECENT total=230799        ← 崩溃前已处理 23 万条
 ```
-对 `pc/lr/回溯帧` 做 `llvm-addr2line`（按 `r-xp` 段偏移 0x732000 换算）得到：
-```
-android::base::BufferQueue<android::base::SmallFixedVector<char, 512ul>>::closeLocked()
-        aemu/base/include/aemu/base/containers/BufferQueue.h:203
-std::__split_buffer<std::unique_ptr<std::variant<monostate, Start, Touch, Stop,
-        EndMonitoring, Poll>>>::begin()        ← emugl HealthMonitor 的事件表
-```
-⇒ 崩点在 **aemu 的 `BufferQueue`（goldfish pipe 的数据队列）+ emugl `HealthMonitor`** 相关
-代码上，`si_code=2`(SEGV_ACCERR，写越界/权限) 且地址落在 scudo 堆区 —— 像堆破坏/竞态。
-这一条会**在访客刚要显示 UI 的时候把整个 VM 打死**，是当前最该修的问题。
+当时用 `llvm-addr2line`（按 `r-xp` 段偏移 0x732000 换算）得到 `aemu BufferQueue::closeLocked()`
+和 emugl `HealthMonitor` 的事件表，据此**猜**成"pipe BufferQueue + HealthMonitor 的堆破坏"。
+
+> **该判断已被证伪 —— 见 §19。** 真正根因是**我们自己的诊断插桩越界读**
+> （`patch_vmhost_diag.py` 注入的 `vmhost_gles2_note()` 按访客自报的 `packetLen`
+> 读参数，越过了命令缓冲区末尾的页边界）。上面这两个符号是"最近符号"式的**误导性归属**：
+> 关键是把 `llvm-nm` 的 **vaddr** 当成了 **file offset**（本 .so 两者差 0x4000）。
+> HealthMonitor 在本工程里根本不会运行（`ENABLE_HEALTH_MONITOR=0`，`CreateHealthMonitor()`
+> 直接返回 `nullptr`，运行时日志固定打 `HealthMonitor disabled.`）。
 
 ## 17.6 下一步（按优先级）
-1. **修 17.5 的崩溃**（跑 ~17min 必崩）。可先试：不启用 HealthMonitor 的 watchdog
-   路径、把 `AsyncResult`/readback 改成同步（`asyncReadbackSupported()` 返回 false 时
-   走 `cb->glOpReadback`），以及检查 pipe `BufferQueue` 是否被多线程并发写。
+1. ~~修 17.5 的崩溃~~ → **已修，见 §19**（诊断插桩的越界读，已按 `end - ptr` 夹紧并实测通过）。
 2. 让访客真正把 UI 画出来（它太慢）：观察 `Displayed` 出现后再判画面；
    必要时在 guest 侧关掉重服务（SystemUI/Launcher 之外的）以加速。
 3. 复现脚本化：本次用 `VMHOST_DIAG=1` 运行即可拿到上面所有表格；
@@ -810,6 +807,93 @@ B 的温控条件**更好**却慢 1.43x ⇒ 钉核收益是实打实的（干净
    需要按服务裁剪或换更精简的镜像；
 2. **快照/恢复**（QEMU `savevm`/`loadvm`）：启动一次后保存，之后秒级恢复 ——
    收益最大，但 gfxstream/Virtio 设备的状态保存是主要风险点，属独立大工程。
+
+## 19. 2026-10-09：§17.5「跑约 17 分钟必崩」真正根因 —— 是**我们自己的诊断插桩越界读**
+
+### 19.1 结论先行
+不是 HealthMonitor、不是 gfxstream、不是 Adreno。是 `patch_vmhost_diag.py` 注入的
+`vmhost_gles2_note()` 在 GLES2 解码循环里**读越界**：
+
+它按**访客自报**的 `packetLen` 去读命令参数（`p + 8 + 4*i`），而缓冲区末尾那个包
+**只到一半**是常态（命令缓冲被拆包，`decode()` 处理不完就返回让调用方补数据），
+此时 `packetLen > end - ptr`，于是读到缓冲区之外；当缓冲区末尾恰好落在**页边界**
+（scudo secondary 分配后面的 guard page）时 → `SIGSEGV si_code=2`（ACCERR，读只读页）
+把整个 QEMU 打死。所以表现为"特定阶段必崩"，且与访客/驱动无关。
+
+### 19.2 证据链（日志行 460175 那次，`VMHOST_GLES2_RECENT total=289572`）
+```
+signal=11 si_code=2 addr=0x70007df000
+pc=0x5a597b5214 lr=0x5a597b522c   x21=0x8   x25=0xb4000070007deff8（= ptr+8）
+```
+- **换算**：本 .so 的 ELF 是 `p_offset=0x7326d0` / `p_vaddr=0x7366d0`（差 0x4000），
+  所以 `file_off = (pc - self_base) - 0x4000`，即 **0xcd5214**。
+- **反汇编（vaddr 0xcd5214）**：
+  ```
+  cd91ec: add  x25, x1, #0x8      ; x25 = ptr + 8
+  cd9214: ldr  w5, [x25, x21]     ; ← 崩溃指令：*(uint32_t*)(ptr + 8 + 4*i)
+  cd9228: bl   snprintf
+  ```
+  x25(0xb4000070007deff8) + x21(8) = 0x70007df000，与 `addr` 逐位吻合。
+- **与注入代码逐字对应**：`mov w26, #0xa0`(=160) 即 `sizeof(args)`，`bl snprintf` 即
+  ```cpp
+  char args[160] = {0};  int n = 0;
+  for (int i = 0; i < 7; i++) {
+      if (len < (uint32_t)(12 + 4 * i)) break;                 // len = 访客自报 packetLen
+      n += snprintf(args + n, sizeof(args) - n, " a%d=0x%x",
+                    i, *(const uint32_t*)(p + 8 + 4 * i));     // ← 越界读
+  }
+  ```
+- **为什么 `len` 会大于实际剩余**：上游的真正校验在**我们这行之后**
+  ```cpp
+  uint32_t packetLen = *(uint32_t *)(ptr + 4);
+  vmhost_gles2_note(opcode, packetLen, ptr);                     /* 我们插的 */
+  if (end - ptr < packetLen) return ptr - (unsigned char*)buf;   /* 上游真正的校验 */
+  ```
+
+### 19.3 为什么上一轮的 HealthMonitor 判断是错的
+- 本工程 `ENABLE_HEALTH_MONITOR` **从未定义**（=0）：编出来的 `libqemu_exec.so` 里
+  `CreateHealthMonitor()` 就是
+  `OutputLog("HealthMonitor disabled."); *out = nullptr;`（一行直接返回）。运行时同样印证：
+  每次 QEMU 启动都打 `HealthMonitor.cpp:280] HealthMonitor disabled.`。
+  ⇒ **根本不存在 HealthMonitor 实例**（`m_healthMonitor == nullptr`），监控线程也从不启动。
+- 因此 `patch_vmhost_healthmon.py`（**已删除**）与 `FrameBuffer` 的 `m_healthMonitor(nullptr)`
+  都是空操作 —— 既不引发、也修不掉这个崩溃。这与"打完补丁 pc 只差 0x10、x0 一样"完全吻合：
+  pc 只是**确定性落点**，不是肇事者。
+- **误判来源**：把 `llvm-nm` 的 **vaddr** 当成了 **file offset**（混用 0xcd5224 / 0xcd5214），
+  正好落进 `HealthMonitor<steady_clock>::main()::lambda(Stop&)` 的地址区间，才"撞"上库里那段无关代码。
+
+### 19.4 修法（已落地）
+`patch_vmhost_diag.py`：解码循环调用点先算 `avail = end - ptr`，传 `min(packetLen, avail)`；
+并自愈旧版（未夹紧）注入。
+```cpp
+const uint32_t vmhostAvail = (uint32_t)(end - ptr);
+vmhost_gles2_note(opcode, packetLen < vmhostAvail ? packetLen : vmhostAvail, ptr);
+```
+这样 `note()` 里所有读取都满足 `12 + 4*i <= len <= avail`，恒在 `[ptr, end)` 内。
+反汇编确认新 `libqemu_exec.so` 已生成夹紧：`cmp w8,w28` + `csel w19,w8,w28,lo`。
+
+> 同时修了 `patch_vmhost_diag.py` 里同一个坑的另一处隐患：`vmhost_gles2_note` 之外
+> 没有第二处"按自报长度读参数"的插桩（gles1 侧只打印 opcode/len，且 unpack 在
+> 上游校验之后），所以这一处就是唯一的肇事点。
+
+### 19.5 实测（真机 cc96ded5 / vm_1 / p11_arm64 / 720x1280 / 4096MB / 6 核）
+| | 旧构建 | 新构建 |
+|---|---|---|
+| 崩溃 | `VMHOST_GLES2_RECENT total=289572` 处 `signal=11 si_code=2` | **无** |
+| 崩溃标记计数（本次运行区间） | 1 | **0** |
+| GL 命令数 | 卡死在 289572 | 越过 **400000** 持续增长 |
+| QEMU 进程 | 亡 | **存活**（17:32 仍在跑，正是过去必崩的时刻） |
+
+复现方式：App 的调试入口 `com.vm.app/.instance.VmNativeActivity1`
+（`--es com.vm.core.extra.CONFIG <json>`），比手工 `mt_ab.sh` 更忠实
+（手工 harness 会卡在 boot 早期、根本走不到 GL 流量）。
+
+### 19.6 提醒（避免重犯）
+- 解析崩溃地址时，**先看 ELF 的 `p_offset` 与 `p_vaddr` 是否相等**再决定喂给
+  `llvm-nm` / `llvm-objdump --start-address` 的数值：本 .so 两者差 0x4000，且
+  `llvm-nm -S` 打印的是 **vaddr**。混用会把 pc 归到完全无关的函数上。
+- **在解码/解析类循环里插桩，读参数的边界必须用"缓冲区真实剩余"（`end - ptr`），
+  绝不能用报文里自报的长度** —— 后者可能超出缓冲区。
 
 
 

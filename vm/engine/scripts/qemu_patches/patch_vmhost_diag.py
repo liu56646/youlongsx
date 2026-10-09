@@ -132,10 +132,59 @@ edit("host/gl/gles2_dec/gles2_dec.cpp", "VMHOST_GLES2_HIST",
        GLES2_HELPER + "typedef unsigned int tsize_t; // Target \"size_t\"")],
      note="GLES2 直方图/环形缓冲/低频参数")
 
-edit("host/gl/gles2_dec/gles2_dec.cpp", "vmhost_gles2_note(opcode, packetLen, ptr)",
-     [("\t\tuint32_t packetLen = *(uint32_t *)(ptr + 4);\n",
-       "\t\tuint32_t packetLen = *(uint32_t *)(ptr + 4);\n\t\tvmhost_gles2_note(opcode, packetLen, ptr);   /* VMHOST_DIAG */\n")],
-     note="在解码循环里调用 note()")
+# 在解码循环里调用 note()：**必须按"真实剩余字节"夹紧 packetLen**（§19 真正根因）。
+#
+# 上游把「这个包放不下就返回、让调用方补数据」的校验放在**我们这行之后**：
+#     uint32_t packetLen = *(uint32_t *)(ptr + 4);
+#     vmhost_gles2_note(opcode, packetLen, ptr);        <-- 我们插的
+#     if (end - ptr < packetLen) return ptr - buf;      <-- 真正的校验在上游很后面
+# 也就是说 packetLen 是访客自报值，**末尾那个包可能只到了一半**（正常情况：命令
+# 缓冲被拆包，decode() 处理不完就返回），此时 packetLen > end - ptr。而 note() 内部
+# 会按 len 读 `p + 8 + 4*i` 的参数 —— 不夹紧就会越过缓冲区末尾。当末尾恰好落在
+# 页边界（scudo secondary 分配后面的 guard page）时，读到 PROT_NONE 页 →
+# SIGSEGV si_code=2 打死整个 QEMU。这正是 §17.5「跑约 17 分钟必崩」的根因：
+# 崩溃 pc 落在 gles2_decoder_context_t::decode() 里那条
+# `ldr w5, [x25, x21]`（x25 = ptr + 8、x21 = 4*i），与 note() 的参数循环逐字对应。
+#
+# 修法：调用点先算 avail = end - ptr，传 min(packetLen, avail)，保证 note() 的所有
+# 读取都落在 [ptr, end) 内（len >= 12 + 4*i 时读 p+8+4*i 才成立，read 结束于
+# 12 + 4*i <= len <= avail，安全）。
+GLES2_CALL_MARK = "VMHOST_DIAG: packetLen 是访客自报值"
+
+GLES2_CALL_OLD = (
+    "\t\tuint32_t packetLen = *(uint32_t *)(ptr + 4);\n"
+    "\t\tvmhost_gles2_note(opcode, packetLen, ptr);   /* VMHOST_DIAG */\n")
+GLES2_CALL_PRISTINE = "\t\tuint32_t packetLen = *(uint32_t *)(ptr + 4);\n"
+GLES2_CALL_NEW = (
+    "\t\tuint32_t packetLen = *(uint32_t *)(ptr + 4);\n"
+    "\t\t/* " + GLES2_CALL_MARK + "，可能大于缓冲区实际剩余（上游校验在下一行才做）。\n"
+    "\t\t   note() 会按 len 读 p+8+4*i 的参数，不夹紧就会越过缓冲区末尾；末尾落在\n"
+    "\t\t   页边界（scudo guard page）时 SIGSEGV si_code=2 打死 QEMU（§19）。\n"
+    "\t\t   这里按真实剩余字节 avail 夹紧，保证读取都在 [ptr, end) 内。 */\n"
+    "\t\t{\n"
+    "\t\t\tconst uint32_t vmhostAvail = (uint32_t)(end - ptr);\n"
+    "\t\t\tvmhost_gles2_note(opcode, packetLen < vmhostAvail ? packetLen : vmhostAvail, ptr);\n"
+    "\t\t}\n")
+
+
+def apply_gles2_call_site(root):
+    """幂等且能自愈旧版（未夹紧）注入。"""
+    path = os.path.join(root, "host/gl/gles2_dec/gles2_dec.cpp")
+    if not os.path.isfile(path):
+        print("WARN  文件不存在，跳过：%s" % path)
+        return "miss"
+    src = io.open(path, encoding="utf-8").read()
+    if GLES2_CALL_MARK in src:
+        return "skip"
+    if GLES2_CALL_OLD in src:                 # 旧版注入（未夹紧）：先替换掉
+        src = src.replace(GLES2_CALL_OLD, GLES2_CALL_NEW, 1)
+    elif GLES2_CALL_PRISTINE in src:          # 干净起点
+        src = src.replace(GLES2_CALL_PRISTINE, GLES2_CALL_NEW, 1)
+    else:
+        print("WARN  解码循环调用点锚点未命中：%s" % path)
+        return "miss"
+    io.open(path, "w", encoding="utf-8").write(src)
+    return "apply"
 
 
 # ----------------------------------------------------------------------------
@@ -665,6 +714,17 @@ def main():
     applied = 0
     skipped = 0
     missed = 0
+
+    # 解码循环的调用点单独处理（要能自愈"未夹紧"的旧版注入）。
+    r = apply_gles2_call_site(root)
+    if r == "apply":
+        applied += 1
+        print("APPLY %-28s %s" % ("解码循环调用点按 avail 夹紧 packetLen",
+                                  "host/gl/gles2_dec/gles2_dec.cpp"))
+    elif r == "skip":
+        skipped += 1
+    else:
+        missed += 1
 
     for relpath, marker, pairs, note in EDITS:
         path = os.path.join(root, relpath)
