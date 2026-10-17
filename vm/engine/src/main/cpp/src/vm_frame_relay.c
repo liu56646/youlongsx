@@ -62,6 +62,11 @@
 
 static char     s_dir[DIR_CAP];
 static uint64_t s_last_seq;
+/* 最近一次成功拿到新帧的单调毫秒时刻。0 = 本进程还没见过任何帧。
+   保存快照前用它判断 guest 的显示是否真的在工作：在显示初始化之前存下来的
+   快照，恢复后 guest 不会出帧（实测 QMP screendump 显示
+   "Guest has not initialized the display (yet)."，post 计数一直停在 2）。 */
+static volatile uint64_t s_last_frame_ms;
 static bool     s_request_pending;
 static uint64_t s_request_sent_ms;   /* 在途请求的发出时刻（判超时用） */
 static uint64_t s_next_request_ms;
@@ -357,6 +362,7 @@ static bool shm_poll(int req_w, int req_h,
            这里直接返回"还没有新帧"即可（省掉每 16ms 一次的文件写入）。 */
         return false;
     }
+    s_last_frame_ms = now_ms();
 
     const uint32_t slot = s_shm->slot;
     const uint32_t fw = s_shm->width;
@@ -466,6 +472,7 @@ bool vm_frame_relay_poll(int req_w, int req_h,
             s_failed_seq = 0;
             s_failed_count = 0;
             s_last_seq = seq_now;
+            s_last_frame_ms = now_ms();
             s_request_pending = false;
             if (rgba) { *rgba = s_frame_pixels; }
             if (w)    { *w = s_frame_w; }
@@ -504,4 +511,8 @@ bool vm_frame_relay_poll(int req_w, int req_h,
     /* 2. 还没有新帧：补请求，并让调用方继续显示上一帧 */
     maybe_request(req_w, req_h);
     return false;
+}
+
+uint64_t vm_frame_relay_last_frame_ms(void) {
+    return __atomic_load_n(&s_last_frame_ms, __ATOMIC_ACQUIRE);
 }

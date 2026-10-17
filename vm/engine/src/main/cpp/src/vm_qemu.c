@@ -19,6 +19,7 @@
 
 #include "vm_qemu.h"
 #include "vm_qmp.h"
+#include "vm_frame_relay.h"
 #include "vmhost_control.h"
 
 #include <pthread.h>
@@ -453,6 +454,24 @@ static void snap_try_save(void)
         return;
     }
 
+    /* 显示没在工作就别存。
+       实测：在 guest 显示初始化之前（刚 boot_completed、还没 post 过帧）存下来的
+       快照，恢复后 guest 一直不出帧 —— QMP screendump 显示
+       "Guest has not initialized the display (yet)."，frame post 计数停在 2，
+       用户看到的就是黑屏。这里要求最近 10 秒内真的出过帧。 */
+    {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        const uint64_t now_ms =
+                (uint64_t) ts.tv_sec * 1000u + (uint64_t) ts.tv_nsec / 1000000u;
+        const uint64_t last_frame_ms = vm_frame_relay_last_frame_ms();
+        if (last_frame_ms == 0 || now_ms - last_frame_ms > 10000u) {
+            LOGW("快照：guest 最近 10s 没有出帧（显示可能未初始化），"
+                 "跳过保存以免恢复后黑屏");
+            return;
+        }
+    }
+
     /* 1) 先冻住 guest：快照必须落在静止点，磁盘与 RAM 才同点 */
     if (vm_qmp_request("stop", NULL, NULL, 0, 5000) < 0) {
         LOGW("快照：QMP stop 未成功，跳过保存");
@@ -842,8 +861,32 @@ static int spawn_qemu_child(const VmQemuParams *p, const char *exe_path, const c
     add_arg("%s", "-display");
     add_arg("%s", "none");
     if (p->serial_log_path != NULL) {
-        add_arg("%s", "-serial");
-        add_arg("file:%s", p->serial_log_path);
+        /* 串口从 "-serial file:" 改成 unix socket + logfile：
+           - 日志照旧全量写 <logs>/console.log（调试不受影响）；
+           - 同时留一个可连的 socket，接上去就是 guest 的 console shell
+             （userdebug 镜像的 init.rc 有 `on init && property:ro.debuggable=1
+             → start console`，也就是 ttyS0 上的 /system/bin/sh）。
+           有了它才能在 guest 里做性能调优（wm size / 关动画 / 停掉没有硬件
+           支撑的 phone、bluetooth 服务），也能直接 dumpsys 看渲染路径。
+           连接方式：adb shell "nc -U <logs>/console.sock"（app 私有目录，
+           用 run-as 或 root）。 */
+        char cons_sock[ARG_CAP];
+        snprintf(cons_sock, sizeof(cons_sock), "%s", p->serial_log_path);
+        char *slash = strrchr(cons_sock, '/');
+        if (slash != NULL) {
+            snprintf(slash + 1, sizeof(cons_sock) - (size_t) (slash + 1 - cons_sock),
+                     "console.sock");
+            unlink(cons_sock);
+            add_arg("%s", "-chardev");
+            add_arg("socket,id=vmhostconsole,path=%s,server,nowait,"
+                    "logfile=%s,logappend=on",
+                    cons_sock, p->serial_log_path);
+            add_arg("%s", "-serial");
+            add_arg("%s", "chardev:vmhostconsole");
+        } else {
+            add_arg("%s", "-serial");
+            add_arg("file:%s", p->serial_log_path);
+        }
     }
     s_argv[s_argc] = NULL;
 

@@ -64,6 +64,13 @@ const char *vm_frame_relay_dir(void);
 bool vm_frame_relay_poll(int req_w, int req_h,
                          const uint8_t **rgba, int *w, int *h, uint64_t *seq);
 
+/**
+ * 最近一次成功拿到新帧的单调毫秒时刻（0 = 本进程还没见过帧）。
+ * 保存快照前用它确认 guest 的显示确实在工作 —— 在显示初始化之前存下来的
+ * 快照，恢复后 guest 不出帧（黑屏），必须避免。
+ */
+uint64_t vm_frame_relay_last_frame_ms(void);
+
 #ifdef __cplusplus
 }
 #endif

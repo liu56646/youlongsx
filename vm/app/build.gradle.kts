@@ -12,8 +12,8 @@ android {
         applicationId = "com.vm.app"
         minSdk = 28
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
 
         // 镜像下载地址，二选一：
         //   -PguestImageBaseUrl=https://host/vm  → 按 <base>/<tag>.zip 取，天然支持多版本（推荐）
@@ -33,9 +33,21 @@ android {
         }
     }
 
+    signingConfigs {
+        create("release") {
+            // 分发用的固定签名（更新必须用同一把 key，否则用户只能卸载重装）。
+            // keystore 随仓库保存，保证任何机器打出来的包都能覆盖安装。
+            storeFile = rootProject.file("keystore/youlong-release.jks")
+            storePassword = "youlong2026"
+            keyAlias = "youlong"
+            keyPassword = "youlong2026"
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 

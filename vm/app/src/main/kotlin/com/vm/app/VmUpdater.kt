@@ -43,8 +43,9 @@ object VmUpdater {
 
         if (!isNewer(latest, currentVersion)) return null
 
-        // APK 命名约定：youlong-sandbox-<version>-debug.apk
-        val apk = "$BASE/youlong-sandbox-$latest-debug.apk"
+        // APK 命名约定：youlong-sandbox-<version>.apk
+        // （0.1.0 用的是 -debug 后缀，这里保留兼容，老 Release 仍可被识别。）
+        val apk = "$BASE/youlong-sandbox-$latest.apk"
         return UpdateInfo(latest, apk)
     }
 

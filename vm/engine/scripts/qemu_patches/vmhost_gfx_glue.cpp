@@ -880,6 +880,12 @@ static void* vmhost_gfx_screen_thread(void* arg) {
     (void)arg;
     unsigned long long seq = 0;
     char req[1024], raw[1024], seqp[1024];
+    /* VMHOST_PERF：每秒打一行「guest post 了多少帧 / 我们发布了多少帧 /
+       发布本身花了多少时间」。用来区分“guest 只画了 9 帧”和“管线把帧丢了”。 */
+    uint64_t s_perf_last_ms = vmhost_gfx_now_ms();
+    unsigned long long s_perf_posts = 0;
+    unsigned long long s_perf_pubs = 0;
+    uint64_t s_perf_publish_us = 0;
     if (snprintf(req, sizeof(req), "%s/frame.request", s_frame_dir) >= (int)sizeof(req) ||
         snprintf(raw, sizeof(raw), "%s/frame.rgba", s_frame_dir) >= (int)sizeof(raw) ||
         snprintf(seqp, sizeof(seqp), "%s/frame.seq", s_frame_dir) >= (int)sizeof(seqp)) {
@@ -893,8 +899,38 @@ static void* vmhost_gfx_screen_thread(void* arg) {
                工作。这样省掉了"App 写请求文件 + 本线程 access() 轮询"的往返，
                也去掉了请求周期（原本最多 ~16ms）给每帧加的延迟 —— 对滑动的
                "跟手感"是最直接的一刀。 */
+            const uint32_t _seq_before = s_shm->seq;
+            struct timespec _ts0, _ts1;
+            clock_gettime(CLOCK_MONOTONIC, &_ts0);
             vmhost_gfx_shm_publish_latest();
+            clock_gettime(CLOCK_MONOTONIC, &_ts1);
+            if (s_shm->seq != _seq_before) {
+                s_perf_pubs++;
+                s_perf_publish_us += (uint64_t)(_ts1.tv_sec - _ts0.tv_sec) * 1000000u +
+                                     (uint64_t)(_ts1.tv_nsec - _ts0.tv_nsec) / 1000u;
+            }
             usleep(8 * 1000);
+            {
+                const uint64_t now = vmhost_gfx_now_ms();
+                static const bool s_perf_on = getenv("VMHOST_PERF") != nullptr;
+                if (s_perf_on && now - s_perf_last_ms >= 1000) {
+                    unsigned long long posts;
+                    {
+                        std::lock_guard<std::mutex> lk(s_latest_mutex);
+                        posts = s_latest_seq;
+                    }
+                    const double secs = (double)(now - s_perf_last_ms) / 1000.0;
+                    fprintf(stderr,
+                            "VMHOST_PERF post_total=%llu shm_seq=%u "
+                            "publish_calls=%llu publish_ms=%.1f\n",
+                            posts, s_shm->seq, s_perf_pubs,
+                            (double)s_perf_publish_us / 1000.0);
+                    (void)secs;
+                    s_perf_last_ms = now;
+                    s_perf_pubs = 0;
+                    s_perf_publish_us = 0;
+                }
+            }
             continue;
         }
         if (access(req, F_OK) == 0) {
