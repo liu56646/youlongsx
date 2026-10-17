@@ -43,6 +43,13 @@ bool vm_qmp_is_connected(void);
 void vm_qmp_touch(int x, int y, int max_x, int max_y, bool down);
 
 /**
+ * 注入一次按键（Linux keycode，见 linux/input-event-codes.h）。
+ * 子进程模式下按键和触摸一样必须走 QMP，父进程直接调 vmhost_input_key()
+ * 会被静默丢弃。
+ */
+void vm_qmp_key(int linux_keycode, bool down);
+
+/**
  * 发一条 QMP 命令并**读回一条应答**（与输入注入的 fire-and-forget 相反）。
  *
  * 快照这类命令必须确认结果：`human-monitor-command` 跑 HMP 命令，或者

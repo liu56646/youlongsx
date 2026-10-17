@@ -79,6 +79,114 @@ object VmDeviceCatalog {
             model = "Pixel 4", name = "flame",
             release = "11", sdk = 30, buildId = "RQ3A.210805.001.A1"
         ),
+        VmDeviceProfile(
+            id = "pixel_4_xl", displayName = "Pixel 4 XL",
+            brand = "google", device = "coral", manufacturer = "Google",
+            model = "Pixel 4 XL", name = "coral",
+            release = "11", sdk = 30, buildId = "RQ3A.210805.001.A1"
+        ),
+        VmDeviceProfile(
+            id = "pixel_5a", displayName = "Pixel 5a",
+            brand = "google", device = "barbet", manufacturer = "Google",
+            model = "Pixel 5a", name = "barbet",
+            release = "11", sdk = 30, buildId = "RQ3A.210805.001.A1"
+        ),
+        VmDeviceProfile(
+            id = "pixel_3", displayName = "Pixel 3",
+            brand = "google", device = "blueline", manufacturer = "Google",
+            model = "Pixel 3", name = "blueline",
+            release = "11", sdk = 30, buildId = "RQ3A.210805.001.A1"
+        ),
+        VmDeviceProfile(
+            id = "pixel_3_xl", displayName = "Pixel 3 XL",
+            brand = "google", device = "crosshatch", manufacturer = "Google",
+            model = "Pixel 3 XL", name = "crosshatch",
+            release = "11", sdk = 30, buildId = "RQ3A.210805.001.A1"
+        ),
+        VmDeviceProfile(
+            id = "pixel_3a", displayName = "Pixel 3a",
+            brand = "google", device = "sargo", manufacturer = "Google",
+            model = "Pixel 3a", name = "sargo",
+            release = "11", sdk = 30, buildId = "RQ3A.210805.001.A1"
+        ),
+        VmDeviceProfile(
+            id = "pixel_3a_xl", displayName = "Pixel 3a XL",
+            brand = "google", device = "bonito", manufacturer = "Google",
+            model = "Pixel 3a XL", name = "bonito",
+            release = "11", sdk = 30, buildId = "RQ3A.210805.001.A1"
+        ),
+        VmDeviceProfile(
+            id = "samsung_s21", displayName = "Galaxy S21 5G",
+            brand = "samsung", device = "o1s", manufacturer = "samsung",
+            model = "SM-G991B", name = "o1s",
+            release = "11", sdk = 30, buildId = "RP1A.200720.012"
+        ),
+        VmDeviceProfile(
+            id = "samsung_s20", displayName = "Galaxy S20 5G",
+            brand = "samsung", device = "y2s", manufacturer = "samsung",
+            model = "SM-G986B", name = "y2s",
+            release = "11", sdk = 30, buildId = "RP1A.200720.012"
+        ),
+        VmDeviceProfile(
+            id = "samsung_note20", displayName = "Galaxy Note20 Ultra",
+            brand = "samsung", device = "c2s", manufacturer = "samsung",
+            model = "SM-N986B", name = "c2s",
+            release = "11", sdk = 30, buildId = "RP1A.200720.012"
+        ),
+        VmDeviceProfile(
+            id = "samsung_a52", displayName = "Galaxy A52",
+            brand = "samsung", device = "a52q", manufacturer = "samsung",
+            model = "SM-A525F", name = "a52q",
+            release = "11", sdk = 30, buildId = "RP1A.200720.012"
+        ),
+        VmDeviceProfile(
+            id = "oneplus_9", displayName = "OnePlus 9",
+            brand = "OnePlus", device = "lemonade", manufacturer = "OnePlus",
+            model = "LE2113", name = "lemonade",
+            release = "11", sdk = 30, buildId = "RKQ1.201112.002"
+        ),
+        VmDeviceProfile(
+            id = "oneplus_8", displayName = "OnePlus 8",
+            brand = "OnePlus", device = "instantnoodle", manufacturer = "OnePlus",
+            model = "IN2013", name = "instantnoodle",
+            release = "11", sdk = 30, buildId = "RP1A.201005.001"
+        ),
+        VmDeviceProfile(
+            id = "xiaomi_mi11", displayName = "Xiaomi Mi 11",
+            brand = "Xiaomi", device = "venus", manufacturer = "Xiaomi",
+            model = "M2011K2C", name = "venus",
+            release = "11", sdk = 30, buildId = "RKQ1.201112.002"
+        ),
+        VmDeviceProfile(
+            id = "xiaomi_k40", displayName = "Redmi K40",
+            brand = "Redmi", device = "alioth", manufacturer = "Xiaomi",
+            model = "M2012K11AC", name = "alioth",
+            release = "11", sdk = 30, buildId = "RKQ1.201112.002"
+        ),
+        VmDeviceProfile(
+            id = "xiaomi_mi10", displayName = "Xiaomi Mi 10",
+            brand = "Xiaomi", device = "umi", manufacturer = "Xiaomi",
+            model = "M2001J2C", name = "umi",
+            release = "11", sdk = 30, buildId = "RKQ1.200826.002"
+        ),
+        VmDeviceProfile(
+            id = "oppo_findx3", displayName = "OPPO Find X3 Pro",
+            brand = "OPPO", device = "findx3", manufacturer = "OPPO",
+            model = "PEEM00", name = "findx3",
+            release = "11", sdk = 30, buildId = "RKQ1.201112.002"
+        ),
+        VmDeviceProfile(
+            id = "vivo_x60", displayName = "vivo X60 Pro",
+            brand = "vivo", device = "v2046", manufacturer = "vivo",
+            model = "V2046A", name = "v2046",
+            release = "11", sdk = 30, buildId = "RP1A.200720.012"
+        ),
+        VmDeviceProfile(
+            id = "honor_50", displayName = "Honor 50",
+            brand = "HONOR", device = "hnb", manufacturer = "HONOR",
+            model = "NTH-AN00", name = "hnb",
+            release = "11", sdk = 30, buildId = "RP1A.200720.012"
+        ),
     )
 
     fun byId(id: String?): VmDeviceProfile? = ALL.firstOrNull { it.id == id }

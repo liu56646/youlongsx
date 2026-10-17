@@ -247,6 +247,65 @@ void vm_input_release_all(void)
 #endif
 }
 
+/*
+ * Android keycode → Linux keycode。
+ *
+ * 子进程模式下按键必须走 QMP，而 QEMU 的 input-send-event 收的是 Linux
+ * keycode。这里只覆盖虚拟机会用到的键：导航、音量、媒体、字母数字和常用
+ * 修饰键。没有映射的键直接丢弃（总比发一个错误码好）。
+ */
+static int android_key_to_linux(int kc)
+{
+    /* 字母：Android 按字母序 A..Z（29..54），Linux 是 QWERTY 扫描码顺序 */
+    static const int kLetters[26] = {
+        30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38, 50,
+        49, 24, 25, 16, 19, 31, 20, 22, 47, 17, 45, 21, 44,
+    };
+    if (kc >= 29 && kc <= 54) {
+        return kLetters[kc - 29];
+    }
+    if (kc >= 7 && kc <= 16) {           /* 0..9 */
+        return (kc == 7) ? 11 : (kc - 8);
+    }
+    switch (kc) {
+        case 3:   return 102;   /* HOME        → KEY_HOME */
+        case 4:   return 158;   /* BACK        → KEY_BACK */
+        case 19:  return 103;   /* DPAD_UP     → KEY_UP */
+        case 20:  return 108;   /* DPAD_DOWN   → KEY_DOWN */
+        case 21:  return 105;   /* DPAD_LEFT   → KEY_LEFT */
+        case 22:  return 106;   /* DPAD_RIGHT  → KEY_RIGHT */
+        case 23:  return 28;    /* DPAD_CENTER → KEY_ENTER */
+        case 24:  return 115;   /* VOLUME_UP   → KEY_VOLUMEUP */
+        case 25:  return 114;   /* VOLUME_DOWN → KEY_VOLUMEDOWN */
+        case 26:  return 116;   /* POWER       → KEY_POWER */
+        case 27:  return 212;   /* CAMERA      → KEY_CAMERA */
+        case 57:  return 56;    /* ALT_LEFT    → KEY_LEFTALT */
+        case 58:  return 100;   /* ALT_RIGHT   → KEY_RIGHTALT */
+        case 59:  return 42;    /* SHIFT_LEFT  → KEY_LEFTSHIFT */
+        case 60:  return 54;    /* SHIFT_RIGHT → KEY_RIGHTSHIFT */
+        case 61:  return 15;    /* TAB         → KEY_TAB */
+        case 62:  return 57;    /* SPACE       → KEY_SPACE */
+        case 66:  return 28;    /* ENTER       → KEY_ENTER */
+        case 67:  return 14;    /* DEL         → KEY_BACKSPACE */
+        case 82:  return 139;   /* MENU        → KEY_MENU */
+        case 84:  return 217;   /* SEARCH      → KEY_SEARCH */
+        case 85:  return 164;   /* MEDIA_PLAY_PAUSE → KEY_PLAYPAUSE */
+        case 86:  return 166;   /* MEDIA_STOP  → KEY_STOPCD */
+        case 87:  return 163;   /* MEDIA_NEXT  → KEY_NEXTSONG */
+        case 88:  return 165;   /* MEDIA_PREVIOUS → KEY_PREVIOUSSONG */
+        case 111: return 1;     /* ESCAPE      → KEY_ESC */
+        case 113: return 29;    /* CTRL_LEFT   → KEY_LEFTCTRL */
+        case 114: return 97;    /* CTRL_RIGHT  → KEY_RIGHTCTRL */
+        case 115: return 58;    /* CAPS_LOCK   → KEY_CAPSLOCK */
+        case 122: return 164;   /* MEDIA_PLAY_PAUSE → KEY_PLAYPAUSE */
+        case 126: return 164;   /* MEDIA_PLAY  → KEY_PLAYPAUSE */
+        case 127: return 164;   /* MEDIA_PAUSE → KEY_PLAYPAUSE */
+        case 164: return 113;   /* VOLUME_MUTE → KEY_MUTE */
+        case 187: return 127;   /* APP_SWITCH  → KEY_COMPOSE */
+        default:  return 0;
+    }
+}
+
 void vm_input_handle_key(AInputEvent *event)
 {
 #ifdef VM_WITH_QEMU
@@ -260,6 +319,19 @@ void vm_input_handle_key(AInputEvent *event)
 
     /* 重复事件（长按）按按下处理，访客侧本来就是这么期望的 */
     LOGI("按键 %d %s", keycode, down ? "按下" : "抬起");
+
+    if (vm_qemu_is_child_process()) {
+        /* 子进程模式：按键和触摸一样走 QMP，直接调 vmhost_input_key 会被丢弃 */
+        const int linux_keycode = android_key_to_linux(keycode);
+        if (linux_keycode <= 0) {
+            return;
+        }
+        char sock[256];
+        if (vm_qemu_qmp_path(sock, sizeof(sock)) && vm_qmp_connect(sock)) {
+            vm_qmp_key(linux_keycode, down);
+        }
+        return;
+    }
     vmhost_input_key(keycode, down);
 #else
     (void) event;

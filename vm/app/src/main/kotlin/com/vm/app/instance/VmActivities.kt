@@ -8,11 +8,15 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import com.vm.app.R
 import com.vm.app.VmLauncher
 
@@ -35,6 +39,23 @@ open class VmNativeActivityBase : NativeActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 真正的沉浸式全屏：隐藏状态栏 + 导航栏。只设 windowFullscreen 时底部
+        // 导航栏/手势区还在，宿主会先吃掉从底部开始的滑动 —— guest 里那条手势
+        // 小横条就永远划不动。再把整块窗口从系统手势里排除（API 29+），
+        // 这样底部/边缘滑动才会完整交给 guest。
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            hide(WindowInsetsCompat.Type.systemBars())
+            systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.decorView.post {
+                window.decorView.systemGestureExclusionRects = listOf(
+                    Rect(0, 0, window.decorView.width, window.decorView.height)
+                )
+            }
+        }
         // 实例整段生命周期都挂一个前台服务：访客要跑几分钟才起来，这期间用户
         // 很可能会切走或锁屏。没有前台服务时进程会掉进 background cpuset
         // （本机只有 0-3 号核，拿不到大核），启动明显变慢，还可能被冻结回收。

@@ -444,6 +444,35 @@ void vm_qmp_touch(int x, int y, int max_x, int max_y, bool down)
     pthread_mutex_unlock(&s_lock);
 }
 
+/* 注入一次按键（Linux keycode，例如 KEY_VOLUMEUP=115）。
+ *
+ * 子进程模式下 vmhost_input_key() 只在 QEMU 进程里有意义（父进程的 s_con
+ * 恒为 NULL），所以按键和触摸一样走 QMP。QEMU 的 input-send-event 用
+ * "type":"key" + Linux keycode，和 evdev 一致。 */
+void vm_qmp_key(int linux_keycode, bool down)
+{
+    if (linux_keycode <= 0) {
+        return;
+    }
+    pthread_mutex_lock(&s_lock);
+    if (s_fd < 0) {
+        pthread_mutex_unlock(&s_lock);
+        return;
+    }
+    char cmd[384];
+    snprintf(cmd, sizeof(cmd),
+             "{\"execute\":\"input-send-event\",\"arguments\":{\"events\":["
+             "{\"type\":\"key\",\"data\":{\"down\":%s,"
+             "\"key\":{\"type\":\"number\",\"data\":%d}}}]}}",
+             down ? "true" : "false", linux_keycode);
+    if (!command_locked(cmd)) {
+        LOGW("按键 input-send-event 发送失败，断开重连");
+        close_locked();
+        s_last_fail_ms = now_ms();
+    }
+    pthread_mutex_unlock(&s_lock);
+}
+
 int vm_qmp_request(const char *command, const char *arguments_json,
                    char *reply_out, size_t reply_cap, int timeout_ms)
 {
