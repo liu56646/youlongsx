@@ -351,6 +351,21 @@ void vm_qmp_touch(int x, int y, int max_x, int max_y, bool down)
     const int ax = (int) ((long) x * QMP_ABS_MAX / max_x);
     const int ay = (int) ((long) y * QMP_ABS_MAX / max_y);
 
+    /* 触摸 slop + 节流。
+     *
+     * guest 侧是单指绝对坐标设备（virtio-tablet），每一帧手指抖动都会被当作
+     * MOVE 发给它。TCG 下 guest 本来就慢，一个"轻点"很容易因为几像素的抖动
+     * 被判成拖动（列表跟着滑、图标被拖走）。这里做两件事：
+     *   1) 从按下点算起，位移小于 12 个 guest 像素时不发 MOVE —— 轻点就是轻点；
+     *   2) 两次 MOVE 之间至少隔 8ms，避免把 QEMU 的输入队列灌爆。
+     * 12px 在 320dpi 下约 6dp，比 Android 默认 touch slop（8dp≈16px）略小，
+     * 不会吃掉正常的拖动起手。 */
+    static int s_down_x, s_down_y;
+    static int s_last_sent_x, s_last_sent_y;
+    static uint64_t s_last_move_ms;
+    const int kTouchSlopGuestPx = 12;
+    const uint64_t kMoveIntervalMs = 8;
+
     pthread_mutex_lock(&s_lock);
     if (s_fd < 0) {
         pthread_mutex_unlock(&s_lock);
@@ -371,9 +386,18 @@ void vm_qmp_touch(int x, int y, int max_x, int max_y, bool down)
         ok = command_locked(cmd);
         s_btn_down = false;
     } else if (!s_btn_down) {
-        /* 新接触：先定位再按下 */
+        /* 新接触：先定位再按下。
+           开头那条 touch-up 是"状态复位"：QMP 断线重连后 guest 仍可能以为自己
+           还按着（上一次的 up 丢在坏掉的连接里），于是之后每次触摸都变成拖动。
+           多发一次 up 在正常路径上无害，但能保证 guest 从干净状态开始。 */
+        s_down_x = x;
+        s_down_y = y;
+        s_last_sent_x = x;
+        s_last_sent_y = y;
+        s_last_move_ms = now_ms();
         snprintf(cmd, sizeof(cmd),
                  "{\"execute\":\"input-send-event\",\"arguments\":{\"events\":["
+                 "{\"type\":\"btn\",\"data\":{\"button\":\"touch\",\"down\":false}},"
                  "{\"type\":\"abs\",\"data\":{\"axis\":\"x\",\"value\":%d}},"
                  "{\"type\":\"abs\",\"data\":{\"axis\":\"y\",\"value\":%d}},"
                  "{\"type\":\"btn\",\"data\":{\"button\":\"touch\",\"down\":true}}]}}",
@@ -384,6 +408,26 @@ void vm_qmp_touch(int x, int y, int max_x, int max_y, bool down)
         }
     } else {
         /* 拖动：只更新位置 */
+        const int dx = x - s_down_x;
+        const int dy = y - s_down_y;
+        const int adx = dx < 0 ? -dx : dx;
+        const int ady = dy < 0 ? -dy : dy;
+        if (adx < kTouchSlopGuestPx && ady < kTouchSlopGuestPx) {
+            pthread_mutex_unlock(&s_lock);
+            return;                    /* 还在 slop 内：保持轻点语义 */
+        }
+        if (x == s_last_sent_x && y == s_last_sent_y) {
+            pthread_mutex_unlock(&s_lock);
+            return;
+        }
+        const uint64_t now = now_ms();
+        if (now - s_last_move_ms < kMoveIntervalMs) {
+            pthread_mutex_unlock(&s_lock);
+            return;
+        }
+        s_last_move_ms = now;
+        s_last_sent_x = x;
+        s_last_sent_y = y;
         snprintf(cmd, sizeof(cmd),
                  "{\"execute\":\"input-send-event\",\"arguments\":{\"events\":["
                  "{\"type\":\"abs\",\"data\":{\"axis\":\"x\",\"value\":%d}},"
