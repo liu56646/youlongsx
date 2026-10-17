@@ -38,6 +38,52 @@ LOG="$BUILD_DIR/build.log"
 
 mkdir -p "$BUILD_DIR"
 
+# ---------------------------------------------------------------- 源码补丁
+# aemu 新版把"暂停渲染器"这一步从地址空间设备挪到了 virtio-gpu 的
+# stream_renderer_snapshot_presave_pause()（见 gfxstream 的
+# virtio-gpu-gfxstream-renderer-goldfish.cpp）。本移植没有接那条 virtio-gpu
+# 钩子，而设备保存顺序里 goldfish_address_space 排在 goldfish_pipe 前面 ——
+# 结果是保存 opengles 管道时渲染线程**从没被暂停过**（mState 还是 Empty），
+# RenderThread::save() 只能死等：实测完全开机的 guest 保存必卡，9 条渲染线程
+# 各等 5s 超时才勉强走完（整次 save 多花 45s，之前更是直接 180s HUP 超时）。
+# 恢复官方原本的那行：地址空间设备保存时统一 pauseAllPreSave()。
+# resume 交给 opengles pipe 的 postSave -> resumeAll()（globalPostSave 保持
+# 注释 —— 若在那里放行，会早于随后 goldfish_pipe 里对 opengles 管道的保存）。
+patch_aemu_graphics_global_presave() {
+    local f="$SRC_DIR/host-common/address_space_graphics.cpp"
+    [ -f "$f" ] || { echo "找不到 $f" >&2; return 1; }
+    if grep -q "VMHOST_FIX_GLOBAL_PRESAVE" "$f"; then
+        echo "==> patch: aemu ASG globalPreSave（已打过，跳过）"
+        return 0
+    fi
+    python3 - "$f" <<'VMHOST_PY'
+import io, sys
+p = sys.argv[1]
+src = io.open(p, encoding='utf-8').read()
+old = """    void preSave() {
+        // mConsumerInterface.globalPreSave();
+    }
+"""
+new = """    void preSave() {
+        /* VMHOST_FIX_GLOBAL_PRESAVE: 官方新版把这行注释掉、改由 virtio-gpu 的
+           stream_renderer_snapshot_presave_pause() 触发 pauseAllPreSave()。
+           本移植没接那条 virtio-gpu 钩子，而设备保存顺序里
+           goldfish_address_space 在 goldfish_pipe 之前 —— opengles 管道保存时
+           渲染线程从没被暂停过（mState 仍为 Empty），RenderThread::save() 死等。
+           恢复这行；resume 仍由 opengles pipe 的 postSave -> resumeAll() 负责。 */
+        mConsumerInterface.globalPreSave();
+    }
+"""
+if old not in src:
+    sys.stderr.write("!! aemu globalPreSave 锚点未命中\n")
+    sys.exit(1)
+io.open(p, 'w', encoding='utf-8').write(src.replace(old, new, 1))
+VMHOST_PY
+    echo "==> patch: aemu ASG globalPreSave 恢复官方语义"
+}
+
+patch_aemu_graphics_global_presave
+
 echo "==> 源码   $SRC_DIR"
 echo "==> 构建   $BUILD_DIR"
 echo "==> ABI    arm64-v8a / android-$API_LEVEL"

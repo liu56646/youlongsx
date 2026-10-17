@@ -94,7 +94,7 @@ static void create_pcie_irq_map(const VirtBoardInfo *vbi,
                                 int first_irq, const char *nodename)
 {
     int devfn, pin;
-    uint32_t full_irq_map[16 * 4 * 10] = { 0 };
+    uint32_t full_irq_map[16 * 4 * 8] = { 0 };
     uint32_t *irq_map = full_irq_map;
 
     for (devfn = 0; devfn <= 0x78; devfn += 0x8) {
@@ -104,15 +104,19 @@ static void create_pcie_irq_map(const VirtBoardInfo *vbi,
             int irq_level = GIC_FDT_IRQ_FLAGS_LEVEL_HI;
             int i;
 
+            /* 每条 entry 必须是 8 cell：子 #address-cells(3) + 子 #interrupt-cells(1)
+               + phandle(1) + GIC #interrupt-cells(3)。QEMU virt.c 那个 10 cell 版本
+               （多两个 0）在 ranchu 上会让内核解析错位 → of_irq_parse_pci: rc=-22，
+               PCI 设备（virtio-gpu-pci / goldfish_address_space）全部没中断。 */
             uint32_t map[] = {
                 devfn << 8, 0, 0,
                 pin + 1,
-                gic_phandle, 0, 0, irq_type, irq_nr, irq_level };
+                gic_phandle, irq_type, irq_nr, irq_level };
 
-            for (i = 0; i < 10; i++) {
+            for (i = 0; i < 8; i++) {
                 irq_map[i] = cpu_to_be32(map[i]);
             }
-            irq_map += 10;
+            irq_map += 8;
         }
     }
 

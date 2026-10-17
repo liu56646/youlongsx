@@ -7,6 +7,8 @@
 #include <android/log.h>
 #include <android/input.h>
 #include <android/native_window.h>
+#include <signal.h>
+#include <time.h>
 
 #include "vm_render.h"
 #include "vm_engine.h"
@@ -86,20 +88,29 @@ void android_main(struct android_app* app) {
     app->onAppCmd = on_app_cmd;
     app->onInputEvent = on_input_event;
 
+    /* 引擎进程会经 QMP 往子进程 QEMU 的 socket 写（见 vm_qmp.c）。子进程退出后
+       写已关闭的 socket 会触发 SIGPIPE，其**默认动作是终止进程** —— 会把整个
+       实例一起带崩。忽略它，让 write 返回 EPIPE，由输入路径按"连接坏了"重连。 */
+    signal(SIGPIPE, SIG_IGN);
+
     LOGI("android_main enter");
     vm_engine_on_instance_start(app);
 
 #ifdef VM_WITH_QEMU
-    int ticks = 0;
-    bool qemu_was_running = false;
+    /* 存活检查按**时间**而不是循环次数：有窗口时每轮 16ms、没窗口时 1s，
+       按 tick 计数会让两种模式下的检查周期差 60 倍。 */
+    struct timespec qemu_checked_at = {0, 0};
+    bool qemu_exit_reported = false;
 #endif
 
     while (!app->destroyRequested) {
         int events;
         struct android_poll_source* source = NULL;
 
-        /* 有窗口时按 ~60fps 轮询驱动渲染；无窗口时阻塞等待事件 */
-        const int timeoutMillis = (app->window != NULL) ? 16 : -1;
+        /* 有窗口时按 ~60fps 轮询驱动渲染；无窗口时也要**每秒醒一次**：
+           下面那段「QEMU 还在不在」的检查依赖这个超时，用 -1 阻塞等待事件
+           会让它永远不执行 —— 子进程崩溃/快照恢复失败就没人收尾（实测踩到）。 */
+        const int timeoutMillis = (app->window != NULL) ? 16 : 1000;
         const int ident = ALooper_pollOnce(timeoutMillis, NULL, &events, (void**) &source);
         if (ident >= 0 && source != NULL) {
             source->process(app, source);
@@ -111,15 +122,28 @@ void android_main(struct android_app* app) {
 
 #ifdef VM_WITH_QEMU
         /* 每约 1 秒确认一次 QEMU 还在不在：子进程退出若不在这里发现，
-           进程会一直留成僵尸，事后只看到"日志突然停了"而不知死因。 */
-        if (++ticks >= 60) {
-            ticks = 0;
-            const bool running = vm_qemu_is_running();
-            if (running) {
-                qemu_was_running = true;
-            } else if (qemu_was_running) {
-                qemu_was_running = false;
-                LOGE("QEMU 已停止运行（退出原因见上一条 VmQemu 日志）");
+           进程会一直留成僵尸，事后只看到"日志突然停了"而不知死因。
+           顺带也是「快照恢复失败 → 删档回退冷启动」的触发点。 */
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (qemu_checked_at.tv_sec == 0 ||
+            now.tv_sec - qemu_checked_at.tv_sec >= 1) {
+            qemu_checked_at = now;
+            /* 只在「拉起过 QEMU」之后才判存活：窗口还没就绪时压根没启动，
+               那时判成"已停止"是误报。 */
+            if (vm_qemu_has_started()) {
+                const bool running = vm_qemu_is_running();
+                if (running) {
+                    qemu_exit_reported = false;
+                } else if (!qemu_exit_reported) {
+                    /* 只报一次：QEMU 可能在第一次存活检查前就退出了（快照恢复
+                       失败就是这种），所以不能用"上一轮看到它在跑"当条件。 */
+                    qemu_exit_reported = true;
+                    LOGE("QEMU 已停止运行（退出原因见上一条 VmQemu 日志）");
+                    /* 如果是快照恢复失败（QEMU 没接受迁移流），这里会删掉坏快照
+                       并按冷启动重来，避免实例一直黑屏。 */
+                    vm_engine_on_qemu_exit();
+                }
             }
         }
 #endif

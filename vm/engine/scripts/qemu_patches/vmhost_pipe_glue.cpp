@@ -8,9 +8,11 @@
 //   设备侧需要 GoldfishPipeServiceOps  -> 通过 goldfish_pipe_set_service_ops() 注入
 //   服务侧需要 AndroidPipeHwFuncs vtbl -> 由 QEMU 设备在 hwpipe 里自带
 //
-// 与上游的差别：去掉了对 protobuf / QemuFileStream 的依赖。快照相关的回调
-// （guest_pre/post_load|save、guest_load/save、dma_save/load_mappings）全部
-// 用空实现——本工程不使用 QEMU save/load 快照，这些回调不会被触发。
+// 快照相关的回调（guest_pre/post_load|save、guest_load/save、
+// dma_save/load_mappings）全部按上游接线：QEMUFile* 包成 QemuFileStream，
+// 再转交给 aemu 的 AndroidPipe 实现。少了这一层，QEMU 恢复快照时
+// goldfish_pipe 的 load 会直接 -EIO（"error while loading state for
+// instance 0x0 of device 'goldfish_pipe'"）。
 
 #include <arpa/inet.h>
 #include <dlfcn.h>
@@ -48,6 +50,10 @@ void cpu_physical_memory_unmap(void* buffer, uint64_t len, int is_write,
 
 #include "android-qemu2-glue/emulation/VmLock.h"
 
+#include "base/files/QemuFileStream.h"
+
+using android::qemu::QemuFileStream;
+
 #include "host-common/AndroidPipe.h"
 #include "host-common/android_pipe_common.h"
 #include "host-common/android_pipe_device.h"
@@ -57,6 +63,7 @@ void cpu_physical_memory_unmap(void* buffer, uint64_t len, int is_write,
 #include "host-common/VmLock.h"
 #include "host-common/goldfish_sync.h"
 #include "host-common/address_space_device.h"
+#include "host-common/address_space_device.hpp"
 #include "host-common/vm_operations.h"
 
 extern "C" {
@@ -349,6 +356,21 @@ public:
         vmhost_pipe_log("qemud_create", (long) client.size());
         return new VmHostQemudPipe(hwPipe, this, client);
     }
+
+    // 快照支持：不实现 canLoad() 时 aemu 会把这类管道**强制关闭**
+    // （goldfish_pipe_load_v2 收到 force_close=1），guest 侧客户端拿到
+    // GOLDFISH_PIPE_ERROR_IO(-4) 后会一直重试 —— 实测恢复后 guest 每 10 秒刷
+    // 一批 "goldfish_pipe ... backend error -4"。本服务的管道没有需要跨快照
+    // 保留的状态：客户端标识全在 args 里，args 会随管道一起存/取，所以 load()
+    // 按 args 重建即可（与官方 AndroidMessagePipe::Service 的语义一致）。
+    bool canLoad() const override { return true; }
+
+    android::AndroidPipe* load(void* hwPipe, const char* args,
+                               android::base::Stream* stream) override {
+        (void) stream;
+        vmhost_pipe_log("qemud_load");
+        return create(hwPipe, args, ANDROID_PIPE_DEFAULT);
+    }
 };
 
 
@@ -501,10 +523,31 @@ public:
         vmhost_pipe_log("misc_create");
         return new VmHostMiscPipe(hwPipe, this);
     }
+
+    // 同 VmHostQemudService：不实现 canLoad() 会被强制关闭，guest 的 misc 客户端
+    // （心跳 / bootcomplete / get_random）会一直重试并刷 backend error -4。
+    // 这条管道没有跨快照要保留的状态，直接重建。
+    bool canLoad() const override { return true; }
+
+    android::AndroidPipe* load(void* hwPipe, const char* args,
+                               android::base::Stream* stream) override {
+        (void) stream;
+        vmhost_pipe_log("misc_load");
+        return create(hwPipe, args, ANDROID_PIPE_DEFAULT);
+    }
 };
 
 // ------------------------------------------------------- ServiceOps 接线
 // 成员顺序必须与 host-common/goldfish_pipe.h 中 GoldfishPipeServiceOps 完全一致。
+
+// aemu 的 C 头（android_pipe_device.h / goldfish_pipe.h）用的是不透明
+// ::Stream*，QemuFileStream 则派生自 android::base::Stream；两者指向同一个对象，
+// reinterpret_cast 互转即可——aemu/base/CStream.cpp 的 asBaseStream() 与
+// HostGoldfishPipe.cpp 里的 cStream 都是这么做的。
+static ::Stream* vmhost_as_c_stream(QemuFileStream* stream) {
+    return reinterpret_cast<::Stream*>(stream);
+}
+
 static const GoldfishPipeServiceOps goldfish_pipe_service_ops = {
     // guest_open()
     [](GoldfishHwPipe* hwPipe) -> GoldfishHostPipe* {
@@ -527,19 +570,51 @@ static const GoldfishPipeServiceOps goldfish_pipe_service_ops = {
                                  static_cast<PipeCloseReason>(reason));
     },
     // guest_pre_load()
-    [](QEMUFile*) {},
+    [](QEMUFile* file) {
+        QemuFileStream stream(file);
+        android_pipe_guest_pre_load(vmhost_as_c_stream(&stream));
+    },
     // guest_post_load()
-    [](QEMUFile*) {},
+    [](QEMUFile* file) {
+        QemuFileStream stream(file);
+        android_pipe_guest_post_load(vmhost_as_c_stream(&stream));
+    },
     // guest_pre_save()
-    [](QEMUFile*) {},
+    [](QEMUFile* file) {
+        std::fprintf(stderr, "VMHOSTSNAP pipe_pre_save enter\n");
+        QemuFileStream stream(file);
+        android_pipe_guest_pre_save(vmhost_as_c_stream(&stream));
+        std::fprintf(stderr, "VMHOSTSNAP pipe_pre_save done\n");
+    },
     // guest_post_save()
-    [](QEMUFile*) {},
+    [](QEMUFile* file) {
+        std::fprintf(stderr, "VMHOSTSNAP pipe_post_save enter\n");
+        QemuFileStream stream(file);
+        android_pipe_guest_post_save(vmhost_as_c_stream(&stream));
+        std::fprintf(stderr, "VMHOSTSNAP pipe_post_save done\n");
+    },
     // guest_load()
-    [](QEMUFile*, GoldfishHwPipe*, char*) -> GoldfishHostPipe* {
-        return nullptr;
+    [](QEMUFile* file, GoldfishHwPipe* hwPipe,
+       char* force_close) -> GoldfishHostPipe* {
+        QemuFileStream stream(file);
+        return static_cast<GoldfishHostPipe*>(
+                android_pipe_guest_load(vmhost_as_c_stream(&stream), hwPipe,
+                                        force_close));
     },
     // guest_save()
-    [](GoldfishHostPipe*, QEMUFile*) {},
+    [](GoldfishHostPipe* hostPipe, QEMUFile* file) {
+        static long s_pipeSaveCount = 0;
+        ++s_pipeSaveCount;
+        const char* svc = hostPipe
+                ? reinterpret_cast<android::AndroidPipe*>(hostPipe)->name()
+                : "(null)";
+        std::fprintf(stderr, "VMHOSTSNAP pipe_save n=%ld host=%p svc=%s\n",
+                     s_pipeSaveCount, (void*) hostPipe, svc);
+        QemuFileStream stream(file);
+        android_pipe_guest_save(hostPipe, vmhost_as_c_stream(&stream));
+        std::fprintf(stderr, "VMHOSTSNAP pipe_save n=%ld done\n",
+                     s_pipeSaveCount);
+    },
     // guest_poll()
     [](GoldfishHostPipe* hostPipe) -> GoldfishPipePollFlags {
         return static_cast<GoldfishPipePollFlags>(
@@ -594,9 +669,17 @@ static const GoldfishPipeServiceOps goldfish_pipe_service_ops = {
     // dma_reset_host_mappings()
     []() { android_goldfish_dma_ops.reset_host_mappings(); },
     // dma_save_mappings()
-    [](QEMUFile*) {},
+    [](QEMUFile* file) {
+        std::fprintf(stderr, "VMHOSTSNAP dma_save enter\n");
+        QemuFileStream stream(file);
+        android_goldfish_dma_ops.save_mappings(&stream);
+        std::fprintf(stderr, "VMHOSTSNAP dma_save done\n");
+    },
     // dma_load_mappings()
-    [](QEMUFile*) {},
+    [](QEMUFile* file) {
+        QemuFileStream stream(file);
+        android_goldfish_dma_ops.load_mappings(&stream);
+    },
 };
 
 static void* goldfish_pipe_lookup_by_id_wrapper(int id) {
@@ -688,6 +771,15 @@ uint64_t goldfish_address_space_get_phys_addr_start(void);
 uint64_t goldfish_address_space_get_phys_addr_start_locked(void);
 uint32_t goldfish_address_space_get_guest_page_size(void);
 int goldfish_address_space_alloc_shared_host_region_fixed_locked(uint64_t page_aligned_size, uint64_t offset);
+// 地址空间设备的 save/load 桥。布局与 include/hw/pci/goldfish_address_space.h 的
+// GoldfishAddressSpaceOps 一致（两个函数指针）；不 include 那个头是为了避免把
+// QEMU 的一堆 typedef 拉进这个不依赖 osdep.h 的 TU。
+typedef struct VmHostGoldfishAddressSpaceOps {
+    int (*load)(QEMUFile* file);
+    int (*save)(QEMUFile* file);
+} VmHostGoldfishAddressSpaceOps;
+void goldfish_address_space_set_service_ops(
+        const VmHostGoldfishAddressSpaceOps* ops);
 // QEMU 侧控制 ops（guest 发 GEN_HANDLE/DESTROY_HANDLE/TELL_PING_INFO/PING 时会调用）。
 // 上游在 android-qemu2-glue/qemu-setup.cpp:271 把 aemu 的实现 cast 后装进来；
 // 两个结构体布局一致（见 include/sysemu/sysemu.h 与 aemu host-common/address_space_device.h）。
@@ -788,6 +880,36 @@ static const struct AddressSpaceHwFuncs vmhost_address_space_hw_funcs = {
     goldfish_address_space_get_phys_addr_start_locked,
     goldfish_address_space_get_guest_page_size,
     goldfish_address_space_alloc_shared_host_region_fixed_locked,
+};
+
+// ------------------------------------------- 地址空间设备 save/load 桥
+// 官方在 android-qemu2-glue/emulation/android_address_space_device.cpp 里把 aemu
+// 的地址空间设备状态挂到 QEMU 设备的 save/load 回调上。本移植一开始没编那个文件，
+// 于是这一挂从来没人做 —— 代价是**两件事同时坏掉**：
+//   1) 快照里没有地址空间设备状态（ASG 图形上下文 / 它们的渲染线程）→ 恢复后
+//      guest 的 gralloc/GLES 路径是断的：实测恢复后 SystemUI 重启、有进程被 kill、
+//      guest 侧 goldfish_pipe 一直报 "backend error -4"（-4 = GOLDFISH_PIPE_ERROR_IO，
+//      就是"宿主已关闭的 pipe 还在被读写"）。
+//   2) AddressSpaceGraphicsContext::globalStatePreSave() 不会被调用 →
+//      RendererImpl::pauseAllPreSave() 也不跑 → opengles 管道的渲染线程从没被
+//      pausePreSnapshot() 碰过（mState 恒为 Empty），状态只能降级成"无状态"，
+//      恢复后渲染线程直接退出。
+// 接上之后：地址空间设备保存时先统一 pauseAllPreSave()，随后 goldfish_pipe 里对
+// opengles 管道的保存就能正常拿到渲染线程状态；resume 由 opengles pipe 的
+// postSave -> resumeAll() 负责。
+static const VmHostGoldfishAddressSpaceOps vmhost_address_space_service_ops = {
+    // .load
+    [](QEMUFile* file) -> int {
+        QemuFileStream stream(file);
+        return android::emulation::goldfish_address_space_memory_state_load(
+                &stream);
+    },
+    // .save
+    [](QEMUFile* file) -> int {
+        QemuFileStream stream(file);
+        return android::emulation::goldfish_address_space_memory_state_save(
+                &stream);
+    },
 };
 
 // ------------------------------------------------- 宿主崩溃捕获（拿 QEMU 崩溃回溯）
@@ -902,6 +1024,23 @@ extern "C" int vmhost_gfx_egl_ctx_info(unsigned long long *out) __attribute__((w
 static void vmhost_crash_handler(int sig, siginfo_t *si, void *ucp) {
     ucontext_t *uc = (ucontext_t *)ucp;
     char buf[256];
+
+    /*
+     * VMHOST_CRASHONCE: 并发崩溃时多个线程会同时进这个 handler，各自的转储
+     * 写进同一个 fd 会互相交织（实测 4 个线程同时 SIGABRT，栈扫描和 GLES2 尾迹
+     * 完全混在一起，读不出任何调用链）。只让第一个进来打完整现场，其余线程
+     * 留一行标记后直接按默认行为终结。
+     */
+    static int s_vmhostCrashDumped = 0;
+    if (__sync_lock_test_and_set(&s_vmhostCrashDumped, 1) != 0) {
+        snprintf(buf, sizeof buf, "VMHOST QEMU CRASH (dup) sig=%d tid=%ld\n",
+                 sig, (long)syscall(SYS_gettid));
+        vmhost_crash_w(buf);
+        if (vmhost_crash_fd >= 0) fsync(vmhost_crash_fd);
+        signal(sig, SIG_DFL);
+        raise(sig);
+        _exit(1);
+    }
 
     vmhost_crash_w("\n########## VMHOST QEMU CRASH ##########\n");
     snprintf(buf, sizeof buf, "signal=%d si_code=%d addr=%p tid=%ld\n", sig,
@@ -1142,6 +1281,12 @@ extern "C" int vmhost_pipe_init(void) {
     // 地址空间设备宿主侧 hw funcs（必须：guest 的 gralloc/HostMemoryAllocator 会用到）
     address_space_set_hw_funcs(&vmhost_address_space_hw_funcs);
     vmhost_pipe_log("地址空间设备宿主 hw funcs 已接线");
+
+    // 地址空间设备的 save/load 桥（等价上游 qemu_android_address_space_device_init
+    // 里那句 goldfish_address_space_set_service_ops）。不接的后果见 ops 表上面的注释：
+    // 快照缺地址空间/渲染线程状态，且 pauseAllPreSave() 永远不跑。
+    goldfish_address_space_set_service_ops(&vmhost_address_space_service_ops);
+    vmhost_pipe_log("地址空间设备 save/load 桥已接线");
 
     // 地址空间设备的 QEMU 侧控制 ops。
     // 不接的话：guest 发 ADDRESS_SPACE_COMMAND_GEN_HANDLE 时，

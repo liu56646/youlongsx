@@ -36,6 +36,20 @@ class VmImageProvider(private val context: Context) {
     /** 数据盘模板（SDK 提供的已格式化空镜像），用于创建实例的可写数据盘。 */
     fun userDataTemplate(tag: String): File = File(imageDir(tag), "userdata.img")
 
+    /**
+     * product / system 分区镜像模板（含 build.prop 设备身份）。
+     * 实例选择自定义机型时会以它们为模板复制再改写，见 [VmDiskStore.ensureDeviceImages]。
+     */
+    fun productTemplate(tag: String): File = File(imageDir(tag), "product.img")
+
+    fun systemTemplate(tag: String): File = File(imageDir(tag), "system.img")
+
+    /**
+     * metadata 盘模板（FBE 元数据分区，Android 11+ 必需）。
+     * 实例必须各有一份可写副本，见 [VmDiskStore.ensureMetadata]。
+     */
+    fun metadataTemplate(tag: String): File = File(imageDir(tag), "metadata.img")
+
     /** 已就绪镜像占用的空间（字节）。 */
     fun sizeOnDisk(tag: String): Long {
         val dir = imageDir(tag)

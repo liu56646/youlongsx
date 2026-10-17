@@ -21,6 +21,9 @@ build/
 /vm/dist/
 /vm/.kotlin/
 /vm/local.properties
+# vm 工程根目录下的本地构建日志（Gradle / 命令行重定向产物）
+/vm/*.log
+/vm/build_log.txt
 
 # --- vm/build-aosp-exp：镜像 / 核心转储 / 运行日志 / 预编译二进制 ---
 # （保留 .sh/.py/.java/.c/.cpp/.aidl/.rc/.ps1 等源码与脚本）
@@ -44,3 +47,10 @@ build/
 /*.so
 /ptrace_catcher
 /g46_tail.txt
+
+# --- 根目录打包产物（APK 等，可重新构建；27MB+ 且每次构建都变）---
+/dist/
+
+# --- Python 字节码缓存 ---
+__pycache__/
+*.pyc

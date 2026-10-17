@@ -1,0 +1,37 @@
+# 锚点清单 —— 每条 = 一个补丁的"目标文件 + 代表性关键字 + 幂等标记"
+#
+# 用途：换 AOSP QEMU / gfxstream 版本后，先用 probe_anchors.py 一键看哪些补丁
+#       的锚点还在、哪些失效，从而知道要重表达哪些。
+#
+# 格式（`|` 分隔，字段两侧空格随意）：
+#     name | root | relpath | token | [mark]
+#   root    : qemu = $SRC_DIR（AOSP QEMU 源码根）; gfx = $GFX_DIR（gfxstream 源码根）
+#   relpath : 相对该根的文件路径；填 * 表示在整棵树里按 token 搜
+#   token   : 一个**应当长期稳定**的标识串（函数名/宏/标识符），用来判断"这段代码还在不在"
+#   mark    : 可选，补丁插入的幂等标记；命中它 = 该补丁「已应用」
+#
+# 关键字失效（❌）= 该处代码被上游改名/搬走/删掉了 → 打开新源码重找等价点、改写锚点。
+# 关键字还在（✅）= 大概率只需微调锚点文本即可。
+#
+# name                  | root | relpath                                        | token                          | mark
+embed_entry             | qemu | vl.c                                           | vmhost_qemu_main               |
+crash_hooks_include     | qemu | vl.c                                           | feature_control.h              | VMHOST_FEATURE_INCLUDE
+crash_hooks_main        | qemu | vl.c                                           | main_impl(argc, argv           | VMHOST_MAIN_CRASH
+noexitctor_main         | qemu | vl.c                                           | qemu_exit_notifiers_notify     | VMHOST_NOEXITCTOR_MAIN
+feature_include         | qemu | vl.c                                           | qemu/osdep.h                   |
+bionic_pty              | qemu | vl.c                                           | pty.h                          |
+goldfish_pipe           | qemu | hw/misc/goldfish_pipe.c                        | goldfish_pipe                  |
+virtio_gpu_cursor       | qemu | hw/display/virtio-gpu.c                        | update_cursor_data_virgl       | VMHOST_NO_VIRGL
+virtio_gpu_trace        | qemu | hw/display/virtio-gpu.c                        | virtio_gpu_set_features        | VMHOST_GPU_TRACE
+virtio_gpu_stream       | qemu | hw/display/virtio-gpu-3d.c                     | CONFIG_STREAM_RENDERER         | VMHOST_STREAM_RENDERER
+virtio_gpu_capset       | qemu | hw/display/virtio-gpu-3d.c                     | virgl_cmd_get_capset_info      | VMHOST_GFXSTREAM_CAPSET
+ranchu_pcie_enum        | qemu | hw/arm/ranchu.c                                | RANCHU_MMIO                    | RANCHU_PCIE_MMIO
+ranchu_pcie_call        | qemu | hw/arm/ranchu.c                                | create_gic                     | RANCHU_PCIE_MMIO
+vmhost_display_hook     | qemu | ui/console.c                                   | graphic_console_init           | vmhost_display_attach
+mmap_alloc              | qemu | *                                              | qemu_memalign                  |
+surface_makecurrent     | gfx  | host/gl/glestranslator/EGL/EglOsApi_egl.cpp    | createPbufferSurface           | VMHOST_PBUFSURF
+surface_makecurrent2    | gfx  | host/gl/glestranslator/EGL/EglOsApi_egl.cpp    | makeCurrent                    | VMHOST_MAKECURFIX
+threadinfo              | gfx  | host/RenderThreadInfo.cpp                      | RenderThreadInfo               |
+processpipe             | gfx  | host/gl/gl-host-common/opengl/GLProcessPipe.cpp| GLProcessPipe                  |
+colorbuffer_diag        | gfx  | host/gl/ColorBufferGl.cpp                      | ColorBufferGl                 | VMHOST_FBO
+framebuffer_diag        | gfx  | host/FrameBuffer.cpp                           | getScreenshot                  | VMHOST_POST

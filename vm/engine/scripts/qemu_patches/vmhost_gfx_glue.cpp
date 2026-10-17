@@ -27,10 +27,13 @@
 // 只是没有 GPU，行为与接线之前一致），方便逐项排障。
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
 
 #include <android/native_window.h>
 
@@ -64,13 +67,13 @@ int32_t ANativeWindow_setBuffersGeometry(ANativeWindow* window, int32_t width,
 }
 }  // extern "C"
 
-// 截图回传（D1a）：
-//   - vmhost_gfx_screenshot_to_file()：从 gfxstream FrameBuffer 取**最新一帧**
-//     （m_lastPostedColorBuffer），按请求缩放后写 PPM 文件；
-//   - 后台线程 vmhost_gfx_screen_thread()：轮询 <frame_dir>/frame.request
-//     （内容 "宽 高"），有请求就截图写 frame.ppm（临时文件 + rename 原子替换），
-//     自增写 frame.seq，再删掉请求文件。App 侧写请求 → 轮询 seq 变化 → 读
-//     frame.ppm 即得当前画面。
+// 截图回传（D1a / v2）：
+//   - vmhost_gfx_screenshot_to_file()：从 gfxstream post 回调的最新帧取像素，
+//     按请求尺寸处理后写**原生 RGBA** 文件（不再走 PPM，见 vmhost_gfx_write_latest_raw）；
+//   - 后台线程 vmhost_gfx_screen_thread()：8ms 一轮轮询 <frame_dir>/frame.request
+//     （内容 "宽 高"），**有新帧时**才写真 frame.rgba（临时文件 + rename 原子替换）
+//     并自增写 frame.seq，然后删掉请求文件。App 侧写请求 → 轮询 seq 变化 → 读
+//     frame.rgba 即得当前画面。
 //   B1 模式下 QEMU 是独立子进程，渲染/取帧都在子进程里，所以必须用
 //   "请求文件 + 结果文件"这种文件握手，App 主进程轮询即可，无需额外 IPC。
 //
@@ -81,11 +84,16 @@ int32_t ANativeWindow_setBuffersGeometry(ANativeWindow* window, int32_t width,
 //   提供像素拷贝，与传输路径无关。这里把最新一帧存进 s_latest_*，截图线程
 //   从这份拷贝写 PPM，完全绕开 m_lastPostedColorBuffer。
 #include <pthread.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
 #include <mutex>
 #include <dlfcn.h>
+
+// 共享内存帧回传的布局（与 App 进程 engine/src/main/cpp/src/vm_frame_relay.c 共用）。
+// build_qemu_aosp.sh 通过 -I$ENGINE_DIR/src/main/cpp/src 让本头可见。
+#include "vm_frame_shm.h"
 
 // gfxstream
 #include "GfxStreamAgents.h"
@@ -120,11 +128,28 @@ extern "C" int goldfish_virtio_init(void) {
     return 0;
 }
 
-// 屏幕尺寸只用于初始化时上报给 guest 的显示驱动，真正的分辨率由 guest 侧
-// 的 SurfaceFlinger/display 决定；这里给一个常见值即可。
-#define VMHOST_GFX_DISPLAY_WIDTH 1080
-#define VMHOST_GFX_DISPLAY_HEIGHT 1920
+// 屏幕尺寸：gfxstream 用它作为"默认显示配置"上报给 guest 的显示驱动，
+// guest 侧 hwcomposer(EmuHWC2) 通过 gfxstream 拿到的就是这里传的尺寸
+// （实测 guest 的 DisplayDeviceInfo 正是 1080x1920，与下面的宏一致）。
+//
+// TCG 下"每个像素"都要由 guest 的 SF/HWC 合成，像素量直接决定合成耗时，
+// 所以这里从 1080x1920 降到 720x1280：像素量 921600/2073600 ≈ 44%，
+// 即合成工作量 -56%。720p 是清晰度仍可接受的最低档。
+#define VMHOST_GFX_DISPLAY_WIDTH 720
+#define VMHOST_GFX_DISPLAY_HEIGHT 1280
 #define VMHOST_GFX_GUEST_API_LEVEL 28
+
+/* 显示尺寸允许被环境变量覆盖：引擎在 fork QEMU 子进程前会 setenv
+   VMHOST_GFX_W / VMHOST_GFX_H（见 vm_qemu.c），这里读它。好处是同一个
+   二进制就能 A/B 对比不同分辨率下的合成开销，不用每次重编 QEMU。
+   未设置或非法（<320 / >4096）时回落上面的编译期默认值。 */
+static int vmhost_gfx_dim_env(const char *name, int def)
+{
+    const char *e = getenv(name);
+    if (e == NULL || *e == '\0') return def;
+    const int v = atoi(e);
+    return (v >= 320 && v <= 4096) ? v : def;
+}
 
 static gfxstream::RenderLibImpl* sVmHostRenderLib = nullptr;
 
@@ -145,6 +170,117 @@ static void vmhost_gfx_log(const char* fmt, ...) {
     fputc('\n', stderr);
     va_end(ap);
 }
+
+// -------------------- 共享内存帧回传（v3，替代 frame.rgba 文件）--------------
+// 布局见 vm_frame_shm.h。写端把最新帧 memcpy 进轮转缓冲并 release 递增 seq；
+// App 进程 mmap 同一文件按 seq 取帧 —— 省掉每帧 open/write/rename 三条系统
+// 调用与文件页缓存抖动。拿不到共享内存（建失败 / 帧比预留大）时上层会回退
+// 原来的文件回传，所以这里失败也不致命。
+static int               s_shm_fd = -1;
+static VmFrameShmHeader* s_shm = nullptr;
+static size_t            s_shm_len = 0;
+
+static void vmhost_gfx_shm_close(void) {
+    if (s_shm != nullptr) {
+        munmap(s_shm, s_shm_len);
+        s_shm = nullptr;
+    }
+    if (s_shm_fd >= 0) {
+        close(s_shm_fd);
+        s_shm_fd = -1;
+    }
+    s_shm_len = 0;
+}
+
+// 建立并映射 <frame_dir>/frame.shm。按显示尺寸预留 nbufs 个缓冲。
+static void vmhost_gfx_shm_open(int disp_w, int disp_h) {
+    if (s_shm != nullptr || s_frame_dir[0] == '\0') {
+        return;
+    }
+    /* 逃生舱：VMHOST_FRAME_SHM=0 强制回退到 frame.rgba 文件回传，便于排障。 */
+    const char* off = getenv("VMHOST_FRAME_SHM");
+    if (off != NULL && off[0] == '0' && off[1] == '\0') {
+        vmhost_gfx_log("shm: VMHOST_FRAME_SHM=0，改用文件回传");
+        return;
+    }
+    if (disp_w <= 0 || disp_h <= 0) {
+        return;
+    }
+
+    size_t stride = (size_t)disp_w * (size_t)disp_h * 4u;
+    stride = (stride + 4095u) & ~(size_t)4095u;   // 4KB 对齐
+    if (stride < 4096u) {
+        stride = 4096u;
+    }
+
+    char path[1024];
+    if (snprintf(path, sizeof(path), "%s/frame.shm", s_frame_dir) >= (int)sizeof(path)) {
+        vmhost_gfx_log("shm: 路径过长，回退文件回传");
+        return;
+    }
+
+    const size_t total = vm_frame_shm_total((uint32_t)stride);
+    const int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    if (fd < 0) {
+        vmhost_gfx_log("shm: open %s 失败：%s，回退文件回传", path, strerror(errno));
+        return;
+    }
+    if (ftruncate(fd, (off_t)total) != 0) {
+        vmhost_gfx_log("shm: ftruncate 失败：%s", strerror(errno));
+        close(fd);
+        return;
+    }
+    void* m = mmap(nullptr, total, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (m == MAP_FAILED) {
+        vmhost_gfx_log("shm: mmap 失败：%s", strerror(errno));
+        close(fd);
+        return;
+    }
+
+    VmFrameShmHeader* h = (VmFrameShmHeader*)m;
+    h->magic = 0;                 // 先置无效，避免 App 端读到半初始化的头
+    h->version = VM_FRAME_SHM_VERSION;
+    h->nbufs = VM_FRAME_SHM_NBUFS;
+    h->stride_cap = (uint32_t)stride;
+    h->disp_w = (uint32_t)disp_w;
+    h->disp_h = (uint32_t)disp_h;
+    h->seq = 0;
+    h->slot = 0;
+    h->width = 0;
+    h->height = 0;
+    h->format = 0;
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    h->magic = VM_FRAME_SHM_MAGIC;   // 最后写 magic：App 端据此判定"已就绪"
+
+    s_shm_fd = fd;
+    s_shm = h;
+    s_shm_len = total;
+    vmhost_gfx_log("shm: 帧回传共享内存就绪 %s（%dx%d stride=%zu n=%u total=%zu）",
+                   path, disp_w, disp_h, stride, (unsigned)VM_FRAME_SHM_NBUFS, total);
+}
+
+// 把一帧 RGBA 发布到共享内存。返回 0 成功；-1 不可用 / 帧过大。
+static int vmhost_gfx_shm_publish(const uint8_t* rgba, unsigned w, unsigned h) {
+    if (s_shm == nullptr || rgba == nullptr || w == 0 || h == 0) {
+        return -1;
+    }
+    const size_t need = (size_t)w * (size_t)h * 4u;
+    if (need > s_shm->stride_cap) {
+        return -1;   // 帧比预留大：交给上层回退文件路径
+    }
+    const uint32_t next = s_shm->seq + 1u;
+    const uint32_t slot = next % s_shm->nbufs;
+    uint8_t* dst = (uint8_t*)s_shm + VM_FRAME_SHM_HDR_SIZE +
+                   (size_t)slot * (size_t)s_shm->stride_cap;
+    memcpy(dst, rgba, need);
+    s_shm->slot = slot;
+    s_shm->width = w;
+    s_shm->height = h;
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    __atomic_store_n(&s_shm->seq, next, __ATOMIC_RELEASE);
+    return 0;
+}
+
 
 // ---- D15：「崩溃线程有没有 current GL 上下文」探针 --------------------------
 // 动机：宿主 Adreno 驱动在**固定指令**上 SIGSEGV（addr=0x38，near-null 解引用），
@@ -375,8 +511,11 @@ extern "C" int vmhost_gfx_init(void) {
     // 4. 启动渲染器
     int glesMajor = 0;
     int glesMinor = 0;
+    const int dispW = vmhost_gfx_dim_env("VMHOST_GFX_W", VMHOST_GFX_DISPLAY_WIDTH);
+    const int dispH = vmhost_gfx_dim_env("VMHOST_GFX_H", VMHOST_GFX_DISPLAY_HEIGHT);
+    vmhost_gfx_log("display %dx%d（env VMHOST_GFX_W/H 可覆盖）", dispW, dispH);
     int ret = android_startOpenglesRenderer(
-            VMHOST_GFX_DISPLAY_WIDTH, VMHOST_GFX_DISPLAY_HEIGHT,
+            dispW, dispH,
             /*guestPhoneApi*/ 1, VMHOST_GFX_GUEST_API_LEVEL, agents->vm,
             agents->emu, agents->multi_display, &glesMajor, &glesMinor);
     vmhost_gfx_log("android_startOpenglesRenderer ret=%d gles=%d.%d", ret,
@@ -438,6 +577,8 @@ extern "C" int vmhost_gfx_init(void) {
         const char* fd = getenv("VMHOST_FRAME_DIR");
         if (fd != NULL && fd[0] != '\0') {
             snprintf(s_frame_dir, sizeof(s_frame_dir), "%s", fd);
+            // 建共享内存回传（首选路径）；失败则线程回退文件回传。
+            vmhost_gfx_shm_open(dispW, dispH);
             pthread_t tid;
             if (pthread_create(&tid, NULL, vmhost_gfx_screen_thread, NULL) == 0) {
                 vmhost_gfx_log("截图回传线程已启动（frame_dir=%s）", s_frame_dir);
@@ -502,49 +643,140 @@ static void vmhost_gfx_on_post(void* ctx, uint32_t displayId, int width, int hei
     s_latest_seq++;
 }
 
-// 从 post callback 保存的最新帧写 PPM（RGBA -> P6 RGB，top-bottom）。
-// 返回 0 成功；-1 还没有任何 post 帧。
-static int vmhost_gfx_write_latest_ppm(const char* path) {
-    std::lock_guard<std::mutex> lk(s_latest_mutex);
-    if (s_latest_pixels.empty() || s_latest_w <= 0 || s_latest_h <= 0) {
-        return -1;
-    }
+/*
+ * 帧回传文件格式（v2，与引擎侧 vm_frame_relay.c 的 load_raw() 一致，小端）：
+ *   [0..3] u32 width   [4..7] u32 height   [8..] width*height*4 字节 RGBA8888
+ *
+ * 为什么不再写 P6 PPM：
+ *   PPM 每像素 3 字节，QEMU 侧要跑一遍 RGBA->RGB、App 侧再跑一遍 RGB->RGBA，
+ *   1080p 每帧两侧各 200 万次逐像素循环；而且 App 拿到 RGB 后还要再拷一次
+ *   才能 glTexSubImage2D。改成原生 RGBA 后：QEMU 侧只做一次 memcpy，
+ *   App 侧直接把读进来的缓冲交给 GL 上传 —— 两侧的转换与一次全帧拷贝全部消失。
+ *   代价是每帧多 33% 字节，换回几次百万级标量循环，很值。
+ */
+static int vmhost_gfx_write_raw_file(const char* path, const uint8_t* rgba,
+                                     unsigned w, unsigned h) {
+    const size_t need = (size_t)w * (size_t)h * 4u;
     char tmp[1024];
     if (snprintf(tmp, sizeof(tmp), "%s.tmp", path) >= (int)sizeof(tmp)) {
         return -1;
     }
-    FILE* fp = fopen(tmp, "wb");
-    if (fp == NULL) {
+    const int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
         return -1;
     }
-    fprintf(fp, "P6\n%d %d\n255\n", s_latest_w, s_latest_h);
-    /*
-     * RGBA -> RGB 先在内存里打包，再一次 fwrite。
-     * 原来逐像素 fputc，720x1280 一帧要 276 万次调用（+无缓冲 IO），
-     * 单帧可达上百毫秒 —— 这条是截图线程的热路径。
-     */
-    {
-        const size_t px = (size_t)s_latest_w * (size_t)s_latest_h;
-        std::vector<uint8_t> rgb(px * 3u);
-        for (size_t i = 0; i < px; i++) {
-            rgb[i * 3u + 0] = s_latest_pixels[i * 4u + 0];
-            rgb[i * 3u + 1] = s_latest_pixels[i * 4u + 1];
-            rgb[i * 3u + 2] = s_latest_pixels[i * 4u + 2];
-        }
-        if (fwrite(rgb.data(), 1, rgb.size(), fp) != rgb.size()) {
-            fclose(fp);
-            unlink(tmp);
-            return -1;
-        }
+    uint8_t hdr[8];
+    memcpy(hdr + 0, &w, 4);
+    memcpy(hdr + 4, &h, 4);
+    const bool ok = (write(fd, hdr, sizeof(hdr)) == (ssize_t)sizeof(hdr)) &&
+                    (write(fd, rgba, need) == (ssize_t)need);
+    close(fd);
+    if (!ok) {
+        unlink(tmp);
+        return -1;
     }
-    fclose(fp);
+    /* 先写临时文件再 rename：App 侧永远读不到半帧。 */
     if (rename(tmp, path) != 0) {
         unlink(tmp);
         return -1;
     }
-    vmhost_gfx_log("screenshot: post-callback %dx%d -> %s (seq=%llu)",
-                   s_latest_w, s_latest_h, path, s_latest_seq);
     return 0;
+}
+
+/* 上次已经写出过的 post 序号，用来跳过重复帧（访客没 post 就不重写）。 */
+static unsigned long long s_written_seq = 0;
+/* 换出的帧缓冲：与 s_latest_pixels 来回换，两边都常驻，不产生每帧分配。 */
+static std::vector<uint8_t> s_snapshot;
+static int s_logged_w = 0;
+static int s_logged_h = 0;
+
+// 从 post callback 保存的最新帧写出**一帧新画面**（原生 RGBA）。
+// 返回 0：写出成功；-1：还没有 post 帧或出错；-2：自上次写出后没有新帧。
+static int vmhost_gfx_write_latest_raw(const char* path) {
+    int w = 0;
+    int h = 0;
+    unsigned long long seq = 0;
+    {
+        /*
+         * 锁内只做 O(1) 的指针交换 —— 绝不持锁写盘、也不持锁做色彩转换。
+         *
+         * 旧实现持着这把锁跑完 200 万次 RGBA->RGB 转换 + 一次几 MB 的 fwrite，
+         * 而访客的 post 回调（vmhost_gfx_on_post）要用**同一把锁**：等于每秒数次
+         * 把访客的渲染管线整条堵死。对 TCG 访客来说，这一堵还会连锁放大。
+         */
+        std::lock_guard<std::mutex> lk(s_latest_mutex);
+        if (s_latest_pixels.empty() || s_latest_w <= 0 || s_latest_h <= 0) {
+            return -1;
+        }
+        if (s_latest_seq == s_written_seq) {
+            return -2;   /* 访客没有再 post，别把同一帧重复写一遍占满 IO */
+        }
+        w = s_latest_w;
+        h = s_latest_h;
+        seq = s_latest_seq;
+        s_snapshot.swap(s_latest_pixels);   /* 换出后 s_latest_pixels 复用旧快照缓冲 */
+    }
+    s_written_seq = seq;
+
+    const size_t need = (size_t)w * (size_t)h * 4u;
+    if (s_snapshot.size() < need) {
+        return -1;
+    }
+    if (vmhost_gfx_write_raw_file(path, s_snapshot.data(), (unsigned)w, (unsigned)h) != 0) {
+        return -1;
+    }
+    if (w != s_logged_w || h != s_logged_h) {
+        s_logged_w = w;
+        s_logged_h = h;
+        vmhost_gfx_log("frame relay v2: %dx%d 原生 RGBA（无色彩转换，锁内不再写盘）", w, h);
+    }
+    return 0;
+}
+
+// 从最新 post 帧发布到共享内存。返回 0 成功；-2 无新帧；-1 不可用（帧过大等）。
+static int vmhost_gfx_shm_publish_latest(void) {
+    if (s_shm == nullptr) {
+        return -1;
+    }
+    int w = 0;
+    int h = 0;
+    unsigned long long seq = 0;
+    {
+        std::lock_guard<std::mutex> lk(s_latest_mutex);
+        if (s_latest_pixels.empty() || s_latest_w <= 0 || s_latest_h <= 0) {
+            return -2;
+        }
+        if (s_latest_seq == s_written_seq) {
+            return -2;   /* 访客没有再 post，别把同一帧重复发布 */
+        }
+        w = s_latest_w;
+        h = s_latest_h;
+        seq = s_latest_seq;
+        s_snapshot.swap(s_latest_pixels);
+    }
+    s_written_seq = seq;
+
+    const size_t need = (size_t)w * (size_t)h * 4u;
+    if (s_snapshot.size() < need) {
+        return -1;
+    }
+    if (vmhost_gfx_shm_publish(s_snapshot.data(), (unsigned)w, (unsigned)h) != 0) {
+        return -1;
+    }
+    if (w != s_logged_w || h != s_logged_h) {
+        s_logged_w = w;
+        s_logged_h = h;
+        vmhost_gfx_log("frame relay v3(shm): %dx%d 原生 RGBA（零文件 IO）", w, h);
+    }
+    return 0;
+}
+
+/* 单调毫秒时钟（只给兜底限流用，不需要墙钟语义）。 */
+static uint64_t vmhost_gfx_now_ms(void) {    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return 0;
+    }
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)(ts.tv_nsec / 1000000L);
 }
 
 extern "C" int vmhost_gfx_screenshot_to_file(const char* path, int max_w, int max_h) {
@@ -553,9 +785,34 @@ extern "C" int vmhost_gfx_screenshot_to_file(const char* path, int max_w, int ma
     }
     /* D1f：优先用 post callback 抓到的最新帧（ASG 数据面也能拿）。
        拿到了就不再走 getScreenshot（它依赖 rcFBPost 更新的 m_lastPostedColorBuffer）。 */
-    if (vmhost_gfx_write_latest_ppm(path) == 0) {
+    const int wr = vmhost_gfx_write_latest_raw(path);
+    if (wr == 0) {
         return 0;
     }
+    if (wr == -2) {
+        /* 访客没有新帧：既不要自增 seq，也别走 getScreenshot 去重复回读同一帧。
+           返回 -2 与 -1（真失败）区分开，调用方据此决定要不要推进 seq。 */
+        return -2;
+    }
+
+    /*
+     * 兜底（getScreenshot）**必须限流**，否则启动阶段会失控。
+     *
+     * 访客还没 post 过帧时（启动前中期），post-callback 路径必然拿不到东西，
+     * 于是每次都落到这里。回传线程现在 8ms 一轮、App 侧 16ms 请求一次，
+     * 不限流就是每秒几十次注定失败的 getScreenshot 探测，而且每次刷一条
+     * stderr —— 实测 80 秒把 qemu-stderr.log 写到 54MB，同时把 CPU 从
+     * TCG 访客手里抢走（越抢越晚出帧，恶性循环）。
+     * 所以两次兜底之间至少隔 250ms，失败日志只打第一次。
+     */
+    static uint64_t s_last_fallback_ms = 0;
+    static bool s_logged_fallback_fail = false;
+    const uint64_t now = vmhost_gfx_now_ms();
+    if (now - s_last_fallback_ms < 250) {
+        return -2;   /* 当成"暂时没有新帧"，调用方不要自增 seq */
+    }
+    s_last_fallback_ms = now;
+
     /* D14b：恢复 getScreenshot 兜底 —— 复核 gfxstream 源码后确认它是**线程安全**的。
      *
      * RendererImpl::getScreenshot → FrameBuffer::getScreenshot 会把回读命令
@@ -565,15 +822,14 @@ extern "C" int vmhost_gfx_screenshot_to_file(const char* path, int max_w, int ma
      * "没有 current context"状态。
      *
      * 它自身失败的真正原因是：displayId==0 时取 m_lastPostedColorBuffer，访客没有
-     * post 过就没有可读的 CB，此时干净返回 -1（不会崩）。所以作为兜底是安全的：
-     * 有 post 帧时优先用 post callback（不缩放），没有时按请求尺寸回读一次。
+     * post 过就没有可读的 CB，此时干净返回 -1（不会崩）。所以作为兜底是安全的。
      */
-    if (max_w > 0 || max_h > 0) {
-        vmhost_gfx_log("screenshot: 无 post-callback 帧，走 getScreenshot 兜底（不做缩放）");
-    }
     const gfxstream::RendererPtr& renderer = android_getOpenglesRenderer();
     if (!renderer) {
-        vmhost_gfx_log("screenshot: renderer 未就绪");
+        if (!s_logged_fallback_fail) {
+            s_logged_fallback_fail = true;
+            vmhost_gfx_log("screenshot: renderer 未就绪（后续同类失败不再刷日志）");
+        }
         return -1;
     }
     unsigned int w = 0, h = 0;
@@ -584,7 +840,11 @@ extern "C" int vmhost_gfx_screenshot_to_file(const char* path, int max_w, int ma
                                       max_h > 0 ? max_h : 0, /*desiredRotation*/ 0);
     if (res != -2 || cap == 0 || w == 0 || h == 0) {
         // res=-1：m_lastPostedColorBuffer 无效，即 guest 还没有成功 post 过帧。
-        vmhost_gfx_log("screenshot: 尺寸探测失败 res=%d cap=%zu %ux%u", res, cap, w, h);
+        if (!s_logged_fallback_fail) {
+            s_logged_fallback_fail = true;
+            vmhost_gfx_log("screenshot: 兜底暂不可用（访客还没 post 过帧）res=%d cap=%zu %ux%u"
+                           "（后续同类失败不再刷日志）", res, cap, w, h);
+        }
         return -1;
     }
     std::vector<uint8_t> pixels(cap);
@@ -595,86 +855,74 @@ extern "C" int vmhost_gfx_screenshot_to_file(const char* path, int max_w, int ma
         vmhost_gfx_log("screenshot: 读取失败 res=%d", res);
         return -1;
     }
-    // getScreenshot(format=3) 给的是 RGBA8888，每像素 4 字节；而 P6 每像素 3 字节。
+    // getScreenshot(format=3) 给的就是 RGBA8888，每像素 4 字节 —— 与 v2 帧格式一致，
+    // 原样落盘即可，不需要任何色彩转换。
     const size_t px = (size_t)w * (size_t)h;
     if (cap < px * 4u) {
         vmhost_gfx_log("screenshot: 缓冲不足 cap=%zu 需要=%zu", cap, px * 4u);
         return -1;
     }
-    // 先写临时文件再 rename，保证 App 侧永远读不到半帧。
-    char tmp[1024];
-    if (snprintf(tmp, sizeof(tmp), "%s.tmp", path) >= (int)sizeof(tmp)) {
-        return -1;
-    }
-    FILE* fp = fopen(tmp, "wb");
-    if (fp == NULL) {
-        vmhost_gfx_log("screenshot: 无法写 %s", tmp);
-        return -1;
-    }
-    fprintf(fp, "P6\n%u %u\n255\n", w, h);
-    // 必须把 RGBA 拆成 RGB 写入：直接 fwrite 4 字节/像素会让 P6 数据整体错位。
-    size_t written = 0;
-    for (size_t i = 0; i < px; i++) {
-        const uint8_t* s = pixels.data() + i * 4u;
-        if (fputc(s[0], fp) == EOF || fputc(s[1], fp) == EOF || fputc(s[2], fp) == EOF) {
-            break;
-        }
-        written += 3;
-    }
-    fclose(fp);
-    if (written != px * 3u) {
-        vmhost_gfx_log("screenshot: 写入不完整 %zu/%zu", written, px * 3u);
-        remove(tmp);
-        return -1;
-    }
-    if (rename(tmp, path) != 0) {
-        vmhost_gfx_log("screenshot: rename 失败 %s", tmp);
-        remove(tmp);
+    if (vmhost_gfx_write_raw_file(path, pixels.data(), w, h) != 0) {
+        vmhost_gfx_log("screenshot: 写 %s 失败", path);
         return -1;
     }
     return 0;
 }
 
 // 后台线程：轮询 <frame_dir>/frame.request（内容 "宽 高"，可缺省）。
-// 有请求 → 截图写 frame.ppm + frame.seq（自增）→ 删请求文件。
-// 200ms 一轮；QEMU 子进程被 SIGTERM 杀掉时线程自然消亡，无需清理。
+// 有新帧 → 写 frame.rgba + 自增 frame.seq → 删请求文件。
+//
+// 轮询间隔 8ms（原来 200ms）。这是本次优化里最要命的一条：200ms 直接把整个
+// 显示回传卡在 ~5 FPS，触摸和滚动的跟手感几乎全丢在这一处，与 TCG 快慢无关。
+// 请求文件是个近乎空的标记文件，QEMU 侧先 access() 再看在不在，所以高频轮询
+// 本身几乎不花 CPU；真正做转换+落盘的次数由"访客是否出新帧"决定。
 static void* vmhost_gfx_screen_thread(void* arg) {
     (void)arg;
     unsigned long long seq = 0;
-    char req[1024], ppm[1024], seqp[1024];
+    char req[1024], raw[1024], seqp[1024];
+    if (snprintf(req, sizeof(req), "%s/frame.request", s_frame_dir) >= (int)sizeof(req) ||
+        snprintf(raw, sizeof(raw), "%s/frame.rgba", s_frame_dir) >= (int)sizeof(raw) ||
+        snprintf(seqp, sizeof(seqp), "%s/frame.seq", s_frame_dir) >= (int)sizeof(seqp)) {
+        vmhost_gfx_log("frame_dir 过长，回传线程退出：%s", s_frame_dir);
+        return NULL;
+    }
     for (;;) {
-        if (snprintf(req, sizeof(req), "%s/frame.request", s_frame_dir) >=
-            (int)sizeof(req)) {
-            usleep(200 * 1000);
+        if (s_shm != nullptr) {
+            /* 共享内存路径：不再依赖 frame.request。
+               访客有新帧就发布一次；没有新帧 publish_latest 返回 -2，不产生任何
+               工作。这样省掉了"App 写请求文件 + 本线程 access() 轮询"的往返，
+               也去掉了请求周期（原本最多 ~16ms）给每帧加的延迟 —— 对滑动的
+               "跟手感"是最直接的一刀。 */
+            vmhost_gfx_shm_publish_latest();
+            usleep(8 * 1000);
             continue;
         }
-        FILE* fp = fopen(req, "rb");
-        if (fp != NULL) {
-            char buf[64];
-            size_t n = fread(buf, 1, sizeof(buf) - 1, fp);
-            fclose(fp);
-            buf[n] = '\0';
-            int max_w = 0, max_h = 0;
-            if (sscanf(buf, "%d %d", &max_w, &max_h) < 2) {
-                max_w = 0;
-                max_h = 0;
+        if (access(req, F_OK) == 0) {
+            int max_w = 0;
+            int max_h = 0;
+            FILE* fp = fopen(req, "rb");
+            if (fp != NULL) {
+                char buf[64];
+                size_t n = fread(buf, 1, sizeof(buf) - 1, fp);
+                fclose(fp);
+                buf[n] = '\0';
+                if (sscanf(buf, "%d %d", &max_w, &max_h) < 2) {
+                    max_w = 0;
+                    max_h = 0;
+                }
             }
-            if (snprintf(ppm, sizeof(ppm), "%s/frame.ppm", s_frame_dir) >=
-                    (int)sizeof(ppm) ||
-                vmhost_gfx_screenshot_to_file(ppm, max_w, max_h) == 0) {
-                if (snprintf(seqp, sizeof(seqp), "%s/frame.seq", s_frame_dir) <
-                    (int)sizeof(seqp)) {
-                    seq++;
-                    FILE* sq = fopen(seqp, "wb");
-                    if (sq != NULL) {
-                        fprintf(sq, "%llu\n", seq);
-                        fclose(sq);
-                    }
+            /* 文件回退路径：只有本线程真正产出新帧才自增 seq，避免 App 白读。 */
+            if (vmhost_gfx_screenshot_to_file(raw, max_w, max_h) == 0) {
+                seq++;
+                FILE* sq = fopen(seqp, "wb");
+                if (sq != NULL) {
+                    fprintf(sq, "%llu\n", seq);
+                    fclose(sq);
                 }
             }
             unlink(req);
         }
-        usleep(200 * 1000);
+        usleep(8 * 1000);
     }
     return NULL;
 }

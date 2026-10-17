@@ -23,10 +23,13 @@
 
 #ifdef VM_WITH_QEMU
 #include "vmhost_input.h"
+#include "vm_qemu.h"
+#include "vm_qmp.h"
 #endif
 
 #define TAG "VmInput"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
 
 /* Android pointer id 的最大取值范围（ACTION_POINTER_ID_MASK 为 0xff00） */
 #define POINTER_ID_MAX 32
@@ -93,6 +96,51 @@ static bool map_pointer(AInputEvent *event, size_t index,
     return true;
 }
 
+#ifdef VM_WITH_QEMU
+/*
+ * 注入一次触摸到访客。
+ *
+ * B1 子进程模式下 QEMU 在**另一个进程**里，本进程的 vmhost_input_touch()
+ * （ui_vmhost.c）是个空壳 —— 它的 s_con 只在子进程的 graphic_console_init()
+ * 里被赋值，父进程恒为 NULL，调用会被静默丢弃。所以改走 QMP 把
+ * input-send-event 发给子进程（见 vm_qmp.c）。
+ *
+ * guest 侧只有 virtio-tablet（单指绝对指针，非多点触控），所以 QMP 路径
+ * 只让 slot 0 驱动这唯一一个指针；第二根及以后的手指被忽略，避免和第一根
+ * 抢位置。进程内嵌 QEMU 时保持原来的直调路径。
+ */
+static void inject_touch(int slot, int x, int y, int max_x, int max_y, bool down)
+{
+    static bool mode_logged;
+    const bool child = vm_qemu_is_child_process();
+
+    if (!mode_logged) {
+        mode_logged = true;
+        LOGI("触摸注入路径：%s", child ? "QMP（QEMU 在子进程）" : "进程内 QEMU 直调");
+    }
+
+    if (child) {
+        if (slot != 0) {
+            return;
+        }
+        char sock[256];
+        if (!vm_qemu_qmp_path(sock, sizeof(sock))) {
+            LOGW("拿不到 QMP socket 路径，触摸无法注入访客");
+            return;
+        }
+        if (!vm_qmp_connect(sock)) {
+            return;   /* vm_qmp_connect() 内部已打日志 */
+        }
+        vm_qmp_touch(x, y, max_x, max_y, down);
+        return;
+    }
+
+    /* 进程内嵌 QEMU：直接调 QEMU 侧后端。子进程模式下这条路是空壳，
+       不打日志免得误导（上面已经处理过了）。 */
+    vmhost_input_touch(slot, x, y, max_x, max_y, down);
+}
+#endif
+
 void vm_input_handle_motion(AInputEvent *event)
 {
 #ifdef VM_WITH_QEMU
@@ -136,7 +184,7 @@ void vm_input_handle_motion(AInputEvent *event)
             break;
         }
         LOGI("按下 pointer=%d slot=%d → 访客 (%d,%d)", indexed_id, slot, gx, gy);
-        vmhost_input_touch(slot, gx, gy, guest_w, guest_h, true);
+        inject_touch(slot, gx, gy, guest_w, guest_h, true);
         break;
     }
 
@@ -153,7 +201,7 @@ void vm_input_handle_motion(AInputEvent *event)
             if (!map_pointer(event, i, guest_w, guest_h, &gx, &gy)) {
                 continue;
             }
-            vmhost_input_touch(slot, gx, gy, guest_w, guest_h, true);
+            inject_touch(slot, gx, gy, guest_w, guest_h, true);
         }
         break;
 
@@ -170,7 +218,7 @@ void vm_input_handle_motion(AInputEvent *event)
         int gy = 0;
         map_pointer(event, indexed, guest_w, guest_h, &gx, &gy);
         LOGI("抬起 pointer=%d slot=%d", indexed_id, slot);
-        vmhost_input_touch(slot, gx, gy, guest_w, guest_h, false);
+        inject_touch(slot, gx, gy, guest_w, guest_h, false);
         release_slot(indexed_id);
         break;
     }
@@ -192,7 +240,7 @@ void vm_input_release_all(void)
             continue;
         }
         /* 抬起只需要 END；位置用 (0,0)，访客侧不关心 */
-        vmhost_input_touch(slot, 0, 0, s_last_guest_w, s_last_guest_h, false);
+        inject_touch(slot, 0, 0, s_last_guest_w, s_last_guest_h, false);
         release_slot(id);
     }
     s_slot_used = 0;

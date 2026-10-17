@@ -1046,5 +1046,183 @@ CPU 集中在 1 个线程，其余 vCPU 线程近乎空闲。**但这不等于"�
   这是唯一能"用满 8 核"的路子。
 - guest 侧减轻启动负载（关掉不需要的系统服务），属改镜像的活。
 
+---
+
+# §22 2026-10-11：**触摸端到端已证「链路是通的」** —— 断点不在 App，在 guest 的输入派发/UI 就绪
+
+## 22.1 结论先行
+
+触摸那条链**从 App 一路通到 guest 的 InputDispatcher**，之前「点了没反应」不是注入侧的 bug：
+
+| 环节 | 证据 | 判定 |
+|---|---|---|
+| App → QMP | `VmInput: QMP（QEMU 在子进程）` + `VmQmp: QMP 已连接 …/qmp.sock` | ✅ |
+| QEMU 路由 | `info mice` → `* Mouse #4: QEMU Virtio Tablet (absolute)`（`*` = 当前生效的绝对指针 handler） | ✅ |
+| QEMU → guest 内核 | guest 内 `getevent -l` 打出 `EV_ABS ABS_X/ABS_Y → EV_KEY BTN_TOUCH → EV_SYN` | ✅ |
+| 内核 → Android InputReader | `I InputReader: Device added: id=2, name='QEMU Virtio Tablet', sources=0x00006103`、`Device reconfigured: … size 720x1280 … display id 0` | ✅ |
+| InputReader → InputDispatcher | 早期一次 `I InputDispatcher: Dropped event because input dispatch is disabled.`；`boot_completed` 后再点不再报丢弃 | 🟡 见 22.3 |
+
+所以 `vm_input.c` / `vm_qmp.c` 的注入实现是对的，**不需要改**。
+
+## 22.2 新增的 guest 侧观测能力（本次落地的关键工具）
+
+宿主侧永远看不到 guest 的 `logcat` / `/dev/input`（`console.log` 只在启动早期转发 logcat，之后停转）。
+解决办法是**在 guest 里加只读诊断 service**，把信息打到内核串口（→ 宿主 `console.log`）：
+
+- 载体：`/vendor/etc/init/vmhost_amctl.rc`（**只改既有文件**，追加 service，不新增 inode）
+- 观测点：
+  - `vmhost_evinfo` / `vmhost_evlog` = `getevent -i` / `getevent -l` → 内核收到了哪些输入事件
+  - `vmhost_inlog` = `logcat -s InputReader:V InputDispatcher:V …` → Android 侧输入栈日志
+  - `vmhost_infdump` = `dumpsys input`（`on property:sys.boot_completed=1` 触发）
+- 关键关键字：`stdio_to_kmsg`（init 把服务 stdio 接到 `/dev/kmsg`，与 `vmhost_amctl` 同款）
+- 注入脚本：`build-aosp-exp/inject_amctl_vendor.sh`（WSL + `debugfs`）
+
+### 两个踩坑
+
+1. **vendor.img inode 用满（`Free inodes: 0`）**：不能新增文件，`debugfs write` 报
+   `Could not allocate inode`。只能**改既有文件**（`rm` + `write` 会复用 inode）。
+2. **`/dev/kmsg` 单次写 > ~1KB 会被拒**：`dumpsys input | stdio_to_kmsg` 的输出会**整段丢失**
+   （连首行都没有）。大输出必须走 `console` 关键字（stdout=/dev/console=串口），
+   或自己逐行切分后再写。
+
+## 22.3 唯一被丢的那次：`input dispatch is disabled`
+
+guest ~444s（`InputManagerService` 刚起来、还没有任何窗口）时注入 tap，内核收到了事件，
+但 Android 记 `Dropped event because input dispatch is disabled.`；到 ~1045s（`boot_completed` 之后）
+再注入就**不再报丢弃**。即这是**早期启动的瞬时状态**，不是持续故障。
+
+⇒ 真正卡住触摸的**不是注入链路，而是「guest 里长期没有一个可交互的前台窗口」**：
+SystemUI 的 `KeyguardService` 在 TCG 下反复 `Skipping duplicate ANR`，Launcher/Activity
+要跑到 **4 小时量级的访客时间**才出来（本次实测：4.4h 访客时间才第一次画出 launcher 形态的帧）。
+在那之前，任何触摸都没有窗口可派发。
+
+## 22.4 本次的修复
+
+1. **`vm/tools/start_vm.sh`：`memoryMb` 2048 → 3072**（原来硬编码，与 `VmConfig` 的实测最优档不一致）。
+2. **`/vendor/etc/init/vmhost_amctl.rc` 增 `setprop ro.hw_timeout_multiplier 10`**：
+   Android 用它统一缩放 ANR / InputDispatcher 等超时，正是给 TCG 这类极慢环境准备的。
+   实测**设置成功**（`ro.iorapd.enable` / `ro.setupwizard.mode` / `ro.lockscreen.disable.default`
+   在 build.prop 里已预设，`setprop` 报 `Read-only property was already set`，属 no-op）。
+
+## 22.5 顺带定位：上一实例 SIGABRT 的真实根因
+
+`logcat -b crash` 明确：不是 SIGSEGV，是
+```
+F libc: FORTIFY: pthread_mutex_lock called on a destroyed mutex (0x…)
+```
+符号化（NDK `llvm-addr2line`，注意本 .so 的 `p_offset` 与 `p_vaddr` 差 0x4000）：
+- `0xc94f10` → `gfxstream::RenderThread::main()`（`RenderThread.cpp:593` 的退出路径
+  `FrameBuffer::getFB()->drainGlRenderThreadResources();` / `~RenderThreadInfo()`）
+- `0xc9850c` → `RenderThreadInfo::~RenderThreadInfo()` 里 `sRegistry.threadInfos.erase(this)`
+  的 `AutoLock lock(sRegistry.lock)` —— 锁已被销毁。
+
+即 **进程退出时的静态析构竞态**：静态析构先跑、把某个 mutex 销毁了，而仍在收尾的
+RenderThread 去加这把已销毁的锁 → FORTIFY abort → QEMU 以 SIGABRT 退出
+（不是干净退出；本工程盘是 `cache=unsafe`，有脏盘风险）。
+
+### 已做的修复（`patch_gfxstream_threadinfo.py`，已接进 `build_gfxstream.sh` 步骤 5f）
+把 `RenderThreadInfo` 的全局注册表 `sRegistry` 改成**堆上分配、永不释放**，
+消除该处析构顺序问题。**但实测 abort 依旧发生** —— 说明被销毁的 mutex 不止这一处。
+
+### 进一步诊断（本轮为把转储变可用而加的）
+1. **崩溃转储一次化**（`vmhost_pipe_glue.cpp` 的 `VMHOST_CRASHONCE`）：4 个线程同时
+   SIGABRT，各自的转储写同一个 fd 会互相交织，读不出任何调用链；改成只第一个
+   线程打完整现场。
+2. **给 gfxstream 开帧指针**（`VMHOST_CRASH_FP=1`，见 `build_gfxstream.sh` 的
+   `CMAKE_CXX_FLAGS`）：`-O2` 丢帧指针会让 fp-walk 断链。
+
+### 订正后的结论（重要）
+干净转储显示：**fp-walk 的全部帧都落在 libc 区段**（`0x7c3dab…`/`0x7c3dac…`，
+即 `abort` → `__fortify_fatal` → `__cxa_finalize`/`exit` 这条路），
+且**栈扫描一个本模块地址都没扫到**（64KB 窗口内）。也就是说：
+- 这**不是**某个我们已知的 gfxstream 静态对象；
+- 崩溃发生在**库层（libc/libc++ 等）的静态析构路径**上，且是多线程并发退出；
+- 被销毁的 mutex 在 bionic 堆上（`0xb400007a…`），说明是某个 `new` 出来的对象的锁，
+  其析构先于另一个析构跑完。
+
+> 注意：栈扫描为空也可能是 `vmhost_crash_read_block` 在退出期读不到
+> `/proc/self/mem` 所致（静默返回 0），所以"调用链在 libc"这一条要结合
+> fp-walk 一起看，不能单独当铁证。
+
+### 根因（已钉死，2026-10-11）
+给 `libsigfix.so` 加了 **VMHOST_MUTEXDBG**（拦 `pthread_mutex_init/destroy`，记录每个
+mutex 的构造点，并用 `/proc/self/maps` 把析构点反查成库名）。实测把 libc 报出来的
+"被销毁的 mutex"地址与 destroy 记录一对，直接点名：
+
+```
+VMHOST_MUTEXDBG destroy mutex=0xb400007e05d36334 init_ra=(未记录)
+  destroy_ra=0x24202e9470 where=/system/lib64/libc++.so+0x27470 tid=… 
+```
+
+⇒ 进程退出时 **静态析构先跑**，销毁的正是
+**平台 `libc++.so` 自己的静态 `std::mutex`**（同一批还有 `android::base::Lock::~Lock()`、
+`gfxstream::opengl::ProcessPipeIdRegistry::~ProcessPipeIdRegistry()`、
+`std::__ndk1::mutex::~mutex()`）；而这时仍有多条线程在收尾并去 `lock` 它们
+→ bionic FORTIFY → `abort()` → SIGABRT。
+
+### 修复（已实测生效）
+1. **`main()` 返回前跳过全部静态析构**（根修）：`build_qemu_aosp.sh` 在
+   `qemu_exit_notifiers_notify(); return res;` 处改成
+   `fprintf(...); fflush(stderr); _exit(res);`。
+   QEMU 真正需要的收尾（block flush / 设备 unrealize）在 `main_impl()` 里已经做完，
+   静态析构在进程退出时没有价值。
+   > 踩坑：**B1 子进程走的是 `vl.c` 的 `main()`**；`vmhost_qemu_main()` 只用于
+   > **进程内嵌**模式。第一版把 `_exit` 打在 `vmhost_qemu_main()` 里，所以完全没生效
+   > （`NOEXITCTOR` 一行都不打）。
+2. **两处同型静态 registry 改成永不析构**（纵深防御，`patch_gfxstream_threadinfo.py`）：
+   `RenderThreadInfo` 的 `sRegistry`、`ProcessPipeIdRegistry` 的 `sRegistry`。
+
+### 实测对照（同镜像 / 同入口，只差这些改动）
+
+| | 修复前 | 修复后 |
+|---|---|---|
+| `FORTIFY: … destroyed mutex` | 多个线程同时报 | **0** |
+| `VMHOST QEMU CRASH` 横幅 | 3 | **0** |
+| 子进程退出码 | `code=1`（SIGABRT 收尾） | **`code=0`** |
+
+## 22.6 待办
+
+1. ~~SIGABRT 精确根因~~ —— **已完成**（见 22.5；根因 = 退出时静态析构竞态，
+   已用 `main()` 的 `_exit` 修掉，并加了两处 registry 纵深防御）。
+2. ~~验证 `ro.hw_timeout_multiplier=10` 的效果~~ —— **已验证有效**：见 §23。
+3. 若 UI 仍太慢：从镜像层砍启动负载（关 SystemUI/Launcher 之外的常驻服务），或做 QEMU 快照/恢复。
+
+---
+
+# §23 2026-10-11（二）：**触摸端到端打通 + UI 就绪从 4.4h 降到 ~25min**
+
+## 23.1 触摸：全链路已证通，且访客 UI 真的有响应
+
+| 环节 | 证据 | 判定 |
+|---|---|---|
+| App → QMP | `VmInput: QMP（QEMU 在子进程）`、`VmQmp: QMP 已连接 …/qmp.sock` | ✅ |
+| QEMU 路由 | `info mice` → `* Mouse #4: QEMU Virtio Tablet (absolute)` | ✅ |
+| QEMU → 内核 | guest 内 `getevent -l`：`EV_ABS ABS_X/ABS_Y → EV_KEY BTN_TOUCH → EV_SYN` | ✅ |
+| 内核 → InputReader | `Device added: id=2, name='QEMU Virtio Tablet', sources=0x00006103`、`Device reconfigured: … size 720x1280 … display id 0` | ✅ |
+| InputReader → InputDispatcher | `PointerEventDispatcher0 (server) spent 43024ms processing MotionEvent(deviceId=2, displayId=0, xCursor=390.7, yCursor=515.3, [0:(390.7,515.3)])` | ✅ |
+| **UI 真的响应** | 在 (220,981) 注入 tap、等 120s 后 `frame.rgba` 变化 **19.0%** | ✅ |
+
+⇒ **`vm_input.c` / `vm_qmp.c` 的注入实现完全正确，无需改动**；之前"点了没反应"的真因是
+**guest 侧输入派发延迟 ~43s/事件**（TCG 下 CPU 极度不足）+ **UI 长期没有可交互窗口**。
+
+## 23.2 `ro.hw_timeout_multiplier=10` 的效果（实测）
+
+同一镜像、同一调试入口，只差这一个 prop：
+
+| | 修复前 | 修复后 |
+|---|---|---|
+| ANR / `Slow operation` 计数 | 一堆（`Skipping duplicate ANR … KeyguardService`） | **0** |
+| `input dispatch is disabled` 丢弃 | 有 | **0** |
+| launcher 出来所需访客时间 | **4.4 小时** | **~25 分钟**（1483s） |
+
+这是本轮收益最大的一条改动：它把 system_server/SystemUI 在 TCG 下动辄破 60s 的工作
+从"触发 ANR → 被杀/重启"变成"只是慢"。
+
+## 23.3 当前仍存的体验问题
+不是 bug，是 TCG 的吞吐天花板：**输入派发 ~43s/事件**，所以点击要等 1~2 分钟才见效。
+要改善只能在"访客更快"上做文章（镜像裁剪 / 快照恢复 / 换更快的主机）。
+
+
+
 
 

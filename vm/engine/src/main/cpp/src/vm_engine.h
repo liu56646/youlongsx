@@ -19,6 +19,12 @@ void vm_engine_on_window_gone(struct android_app* app);
 /** 实例退出：保存可写盘、释放 QEMU 资源。 */
 void vm_engine_on_instance_stop(struct android_app* app);
 
+/**
+ * QEMU 子进程退出后的收尾：若这次是按快照恢复且失败，删掉坏快照并按冷启动重来。
+ * 由 android_main 的存活检查在发现 QEMU 退出时调用。
+ */
+void vm_engine_on_qemu_exit(void);
+
 #ifdef __cplusplus
 }
 #endif

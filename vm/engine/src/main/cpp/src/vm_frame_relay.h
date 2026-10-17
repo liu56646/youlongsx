@@ -12,10 +12,16 @@
  * 文件握手，本模块是这套协议的**客户端**（此前缺失）：
  *
  *   引擎写 <dir>/frame.request（内容 "宽 高"，两个整数）
- *     → QEMU 侧线程截图，先写 <dir>/frame.ppm.tmp 再 rename 成 frame.ppm（P6）
+ *     → QEMU 侧线程在访客**有新帧**时先写 <dir>/frame.rgba.tmp 再 rename 成
+ *       frame.rgba（原生 RGBA8888，格式见 vm_frame_relay.c 的 load_raw）
  *     → 自增写 <dir>/frame.seq（十进制文本 + 换行）
  *     → 删掉 frame.request
- *   引擎轮询 frame.seq，发现变化就读 frame.ppm 并转成 RGBA8888
+ *   引擎轮询 frame.seq，发现变化就把 frame.rgba 读进来直接交给 GL 上传
+ *
+ * v3（共享内存）：写端同时在 <dir>/frame.shm 建一块 mmap（布局见
+ * vm_frame_shm.h），把最新帧写进轮转缓冲并递增头里的 seq；本模块**优先**用它
+ * （省掉每帧 open/read 的系统调用与文件页缓存开销），拿不到时自动回退上面的
+ * 文件协议。frame.request 仍是"要一帧"的控制信号，两种路径共用。
  *
  * 只依赖 libc，不依赖 QEMU，因此纯骨架构建下同样可以编译。
  */
@@ -43,11 +49,14 @@ const char *vm_frame_relay_dir(void);
 /**
  * 轮询一帧（非阻塞，可在渲染线程每帧调用）。
  *
- * 有**新**帧时返回 true，并把 *rgba 指向模块内部所有的一块 RGBA8888 缓冲
- * （行紧密排列，stride == 宽 * 4）。该缓冲在下一次成功轮询前保持有效。
- *
- * 没有新帧时返回 false，并在需要时补发一次 frame.request。若引擎已有上一帧，
- * 调用方应保留它（画面不要闪黑）。
+ * 有**新**帧时返回 true，并把 *rgba 指向一块 RGBA8888 缓冲（行紧密排列，
+ * stride == 宽 * 4）。
+ *   共享内存路径下（v3）：*rgba 直接指向 <dir>/frame.shm 里对应槽的映射，
+ *     调用方应在本次调用返回后**立即**使用（如交给 glTexSubImage2D）。该指针
+ *     在写端复用同一槽之前有效——3 缓冲轮转下约为后续 NBUFS 帧，足够一次上传。
+ *   文件回退路径下：*rgba 指向模块内部缓冲，在下一次成功轮询前保持有效。
+ * 没有新帧时返回 false 并补发一次 frame.request；若引擎已有上一帧，调用方应
+ * 保留它（画面不要闪黑）。
  *
  * @param req_w / req_h 期望的最大尺寸，<=0 表示取访客原生分辨率。
  *                      （当前 QEMU 侧 post-callback 路径不缩放，仅作提示。）

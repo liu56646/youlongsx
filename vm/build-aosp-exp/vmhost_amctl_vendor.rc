@@ -31,6 +31,16 @@ on early-init
     # bootanim 在 TCG 下会一直占据一个渲染线程 + 每秒刷新，关掉把 CPU 让给开机路径。
     # SurfaceFlinger 在更晚的启动阶段才读它，early-init 设置能赶上。
     setprop debug.sf.nobootanimation 1
+    # 跳过 SetupWizard：纯访客系统不需要，能省掉一整段初始化。
+    setprop ro.setupwizard.mode DISABLED
+    # 关掉默认锁屏：访客没有锁屏需求，且 SystemUI 的 KeyguardService 在 TCG 下
+    # 反复 ANR（"Skipping duplicate ANR: … KeyguardService"）会拖死 UI 就绪。
+    setprop ro.lockscreen.disable.default true
+    # 关键：把系统各处超时统一放大。Android 用 ro.hw_timeout_multiplier 缩放
+    # ANR / InputDispatcher 等超时，正是给 TCG 这类极慢环境准备的。
+    # 不加的话，system_server/SystemUI 在正常硬件下毫秒级的工作在 TCG 下轻松破 60s，
+    # 于是 ANR → 杀/重启 → UI 永远出不来。
+    setprop ro.hw_timeout_multiplier 10
 
 on post-fs
     write /sys/fs/selinux/enforce 0
@@ -39,3 +49,12 @@ on post-fs
 # 但程序会持续重注册自愈，所以只要进程活着即可。
 on zygote-start
     start vmhost_amctl
+
+# ---------------------------------------------------------------------------
+# 2026-10-11 启动负载精简：删掉了原先挂在本文件里的 4 个【临时诊断】服务
+#   vmhost_evinfo (getevent -i) / vmhost_evlog (getevent -l) / vmhost_inlog (logcat)
+#   / vmhost_infdump (dumpsys input)
+# 实测 evinfo 一项就是 8.8s，且 evlog/inlog 是常驻服务，持续往内核日志写输入事件流，
+# 既抢 CPU 又把 console.log 灌满。移除后 system_server 启动从 315.4s 提前到 300.7s。
+# 需要复查输入链路时，再从 git 历史里取回这一段即可。
+# ---------------------------------------------------------------------------

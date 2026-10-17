@@ -18,30 +18,40 @@
 #
 # 用法：
 #   adb push start_vm.sh /data/local/tmp/
-#   adb shell sh /data/local/tmp/start_vm.sh [imageTag] [netMode]
+#   adb shell sh /data/local/tmp/start_vm.sh [imageTag] [netMode] [cores] [vmId]
 #
 TAG="${1:-p11_arm64}"
 NET="${2:-NAT}"
+# vCPU 数。实测 guest 的关键路径（system_server / SurfaceFlinger / launcher 主线程）
+# 是单线程串行的，多给 vCPU 用不上，反而有 MTTCG 抢锁和 idle vCPU 被定时器唤醒的开销，
+# 所以留一个参数方便做 1/2/4 的对比实验。
+CORES="${3:-4}"
+# 实例号：决定数据目录与拉起哪个实例进程（VmNativeActivity<N>）。默认 1。
+VMID="${4:-1}"
+# 访客显示分辨率（运行期可调，见 vm_qemu.c 的 VMHOST_GFX_W/H）。
+# TCG 下像素量直接决定合成耗时，留成参数便于 A/B 对比。
+W="${5:-720}"
+H="${6:-1280}"
 
 APP=com.vm.app
 BASE=/data/user/0/$APP/files
-DATA=$BASE/vms/vm_1
+DATA=$BASE/vms/vm_$VMID
 
 # --- 实例数据盘 ---------------------------------------------------------
 # Android 的 /data 必须是已格式化的分区，用镜像里的 userdata.img 当模板，
 # 再稀疏扩容；直接给全零文件访客会卡在挂载 /data。
-run-as $APP mkdir -p files/vms/vm_1/logs
+run-as $APP mkdir -p files/vms/vm_$VMID/logs
 
-if ! run-as $APP test -f files/vms/vm_1/userdata.img; then
+if ! run-as $APP test -f files/vms/vm_$VMID/userdata.img; then
     echo "创建数据盘：以 $TAG/userdata.img 为模板"
-    run-as $APP cp "files/images/$TAG/userdata.img" files/vms/vm_1/userdata.img
-    run-as $APP truncate -s 4G files/vms/vm_1/userdata.img
+    run-as $APP cp "files/images/$TAG/userdata.img" files/vms/vm_$VMID/userdata.img
+    run-as $APP truncate -s 4G files/vms/vm_$VMID/userdata.img
 fi
 
 # --- 启动 ---------------------------------------------------------------
-CONFIG="{\"vmId\":1,\"width\":720,\"height\":1280,\"dpi\":320,\"memoryMb\":2048,\"cores\":4,\"gpuMode\":\"GLES\",\"netMode\":\"$NET\",\"imageDir\":\"$BASE/images/$TAG\",\"dataDir\":\"$DATA\"}"
+CONFIG="{\"vmId\":$VMID,\"width\":$W,\"height\":$H,\"dpi\":320,\"memoryMb\":3072,\"cores\":$CORES,\"gpuMode\":\"GLES\",\"netMode\":\"$NET\",\"imageDir\":\"$BASE/images/$TAG\",\"dataDir\":\"$DATA\"}"
 
 echo "image = $BASE/images/$TAG"
 echo "data  = $DATA"
 
-am start -n $APP/.instance.VmNativeActivity1 --es com.vm.core.extra.CONFIG "$CONFIG"
+am start -n $APP/.instance.VmNativeActivity$VMID --es com.vm.core.extra.CONFIG "$CONFIG"

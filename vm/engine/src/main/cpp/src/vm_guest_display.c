@@ -9,7 +9,7 @@
  *
  *   2) QEMU 独立子进程（B1 模式，libqemu_exec.so 随包分发）：
  *      帧缓冲在**另一个进程**里，进程内后端永远取不到帧，必须走
- *      frame.request / frame.ppm 文件握手（vm_frame_relay.c）。
+ *      frame.request / frame.rgba 文件握手（vm_frame_relay.c）。
  *
  * 分工：QEMU 线程只负责写帧；本文件运行在 android_main 的渲染线程上，
  * 负责取帧 + 上传，所有 GL 调用都发生在有 EGL 上下文的那条线程。
@@ -106,7 +106,7 @@ bool vm_guest_display_poll(void)
     /*
      * 路径 2：QEMU 跑在独立子进程（B1 模式，即 libqemu_exec.so 随包分发时）。
      * 此时帧缓冲在**另一个进程**里，上面的进程内后端永远是空的 ——
-     * 只能走 frame.request / frame.ppm 文件握手（vm_frame_relay.c）。
+     * 只能走 frame.request / frame.rgba 文件握手（vm_frame_relay.c）。
      * 这正是此前「沙箱不回显」的缺口。
      */
     if (src == NULL) {

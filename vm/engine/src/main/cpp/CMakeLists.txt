@@ -9,7 +9,7 @@ set(ENGINE_SOURCES
         src/vm_activity.c
         src/vm_render.c
         src/vm_guest_display.c
-        # B1 子进程模式下的帧回传客户端（frame.request / frame.ppm 握手）。
+        # B1 子进程模式下的帧回传客户端（frame.request / frame.rgba 握手）。
         # 只依赖 libc，纯骨架构建下同样编入。
         src/vm_frame_relay.c
         src/vm_input.c
@@ -28,6 +28,9 @@ set(VM_WITH_QEMU FALSE)
 if(EXISTS "${QEMU_PREBUILT}/libqemu_objs.a")
     set(VM_WITH_QEMU TRUE)
     list(APPEND ENGINE_SOURCES src/vm_qemu.c)
+    # B1 子进程模式下父进程与子进程 QEMU 之间的输入注入通道（QMP unix socket）。
+    # 只依赖 libc，但仅在有 QEMU 时才有意义。
+    list(APPEND ENGINE_SOURCES src/vm_qmp.c)
     message(STATUS "vmengine: 找到 QEMU 预编译产物，将链接进 libvmengine.so (${ANDROID_ABI})")
 else()
     message(STATUS "vmengine: 未找到 ${QEMU_PREBUILT}/libqemu_objs.a，构建为纯骨架")

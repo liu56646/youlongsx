@@ -22,7 +22,11 @@ class VmRepository(context: Context) {
     fun get(vmId: Int): VmInfo? = list().firstOrNull { it.vmId == vmId }
 
     /** 分配一个空闲实例号（1..[VmConstants.MAX_INSTANCES]），无空闲则返回 null。 */
-    fun create(name: String? = null, imageTag: String = VmConstants.DEFAULT_IMAGE_TAG): VmInfo? =
+    fun create(
+        name: String? = null,
+        imageTag: String = VmConstants.DEFAULT_IMAGE_TAG,
+        deviceProfileId: String? = null
+    ): VmInfo? =
         synchronized(lock) {
             val items = readIndex().toMutableList()
             val used = items.map { it.vmId }.toSet()
@@ -32,13 +36,24 @@ class VmRepository(context: Context) {
                 vmId = id,
                 name = name?.takeIf { it.isNotBlank() } ?: "虚拟机 $id",
                 createdAt = System.currentTimeMillis(),
-                imageTag = imageTag
+                imageTag = imageTag,
+                deviceProfileId = deviceProfileId?.takeIf { VmDeviceCatalog.byId(it) != null }
             )
             items += info
             writeIndex(items)
             // 数据盘必须以镜像里的 userdata.img 为模板（已格式化的空分区），
             // 否则访客首启会卡在挂载 /data。
             disk.ensureUserData(id, images.userDataTemplate(imageTag))
+            // metadata 盘（FBE 元数据）必须存在，否则盘序错位、guest 起不来。
+            disk.ensureMetadata(id, images.metadataTemplate(imageTag))
+            // 设备身份：选了机型才复制并改写实例级 product.img / system.img
+            // （base 那份是共享只读的）。两份合计 1GB+，调用方应放到后台线程。
+            disk.ensureDeviceImages(
+                id,
+                images.productTemplate(imageTag),
+                images.systemTemplate(imageTag),
+                VmDeviceCatalog.byId(deviceProfileId)
+            )
             info
         }
 
@@ -71,7 +86,8 @@ class VmRepository(context: Context) {
                     vmId = o.getInt("vmId"),
                     name = o.optString("name", "虚拟机 ${o.getInt("vmId")}"),
                     createdAt = o.optLong("createdAt", 0L),
-                    imageTag = o.optString("imageTag", VmConstants.DEFAULT_IMAGE_TAG)
+                    imageTag = o.optString("imageTag", VmConstants.DEFAULT_IMAGE_TAG),
+                    deviceProfileId = o.optString("deviceProfileId", "").takeIf { it.isNotBlank() }
                 )
             }
         }.getOrElse { mutableListOf() }
@@ -87,6 +103,7 @@ class VmRepository(context: Context) {
                     .put("name", info.name)
                     .put("createdAt", info.createdAt)
                     .put("imageTag", info.imageTag)
+                    .apply { info.deviceProfileId?.let { put("deviceProfileId", it) } }
             )
         }
         indexFile.writeText(arr.toString())

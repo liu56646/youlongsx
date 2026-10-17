@@ -26,40 +26,8 @@
             android:paddingStart="16dp"
             android:paddingTop="4dp"
             android:paddingEnd="16dp"
-            android:paddingBottom="4dp"
+            android:paddingBottom="8dp"
             android:textSize="12sp" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnOneClick"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="16dp"
-            android:layout_marginTop="8dp"
-            android:layout_marginEnd="16dp"
-            android:text="@string/one_click_start" />
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:paddingStart="16dp"
-            android:paddingTop="4dp"
-            android:paddingEnd="16dp"
-            android:paddingBottom="8dp">
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnNetwork"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="@string/action_network" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnExtract"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
-                android:text="@string/action_extract" />
-        </LinearLayout>
 
         <FrameLayout
             android:layout_width="match_parent"

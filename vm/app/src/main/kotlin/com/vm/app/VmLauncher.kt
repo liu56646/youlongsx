@@ -8,7 +8,10 @@ import com.vm.app.instance.VmNativeActivity1
 import com.vm.app.instance.VmNativeActivity2
 import com.vm.app.instance.VmNativeActivity3
 import com.vm.app.instance.VmNativeActivity4
+import com.vm.core.VmBackend
+import com.vm.core.VmBackendStore
 import com.vm.core.VmConfig
+import com.vm.core.VmDeviceCheck
 import com.vm.core.VmDiskStore
 import com.vm.core.VmImageProvider
 import com.vm.core.VmInfo
@@ -49,8 +52,36 @@ object VmLauncher {
         }
         val cls = activityClass(info.vmId) ?: return Result.Unsupported
 
+        // 快照用的 qcow2 vmstate 盘：QEMU 不会自己建，启动前从 assets 复制一份。
+        // 失败不阻断启动（只是这次快照不可用）。
+        if (!diskStore.ensureVmstate(info.vmId)) {
+            Log.w(TAG, "vmstate.qcow2 准备失败，本次快照保存会失败（冷启动不受影响）")
+        }
+
+        // 按宿主能力自适应：低配设备下调 guest 内存与 vCPU 数，
+        // 避免 -m 超出宿主可用内存被 OOM，或 -smp 超过物理核导致过度调度。
+        val device = VmDeviceCheck.check(context)
+        val cores = minOf(
+            VmConfig.DEFAULT_CORES,
+            Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+        )
+
+        // 自动选择本机最优后端：探测确认宿主 KVM 可用 → KVM（ARM 指令原生执行，
+        // 免 TCG 二进制翻译损耗）；否则 → TCG。引擎 C 层还会再核对一次
+        // /dev/kvm 是否真能打开，打不开自动回退 TCG。
+        val report = VmBackendStore(context).load()
+        val backend = if (report?.resultOf(VmBackend.KVM)?.available == true) {
+            VmBackend.KVM
+        } else {
+            VmBackend.QEMU_TCG
+        }
+        VmBackend.ACTIVE = backend
+
         val config = VmConfig(
             vmId = info.vmId,
+            memoryMb = device.suggestedGuestMemMb,
+            cores = cores,
+            backend = backend,
             imageDir = imageProvider.imageDir(info.imageTag).absolutePath,
             dataDir = diskStore.vmDir(info.vmId).absolutePath
         )

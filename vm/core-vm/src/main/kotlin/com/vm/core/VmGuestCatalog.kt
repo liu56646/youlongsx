@@ -29,12 +29,23 @@ data class VmGuestImage(
  */
 object VmGuestCatalog {
 
+    /**
+     * 可选的访客系统版本 —— **只登记实测能跑起来的**。
+     *
+     * p71(7.1) / p9(9) / p13(13) 的 SDK 原版镜像与本引擎的 ranchu 适配层不兼容：
+     *   - ramdisk 里没有匹配内核版本的 `virtio_blk.ko`（p11 是项目专门配的 40 个 .ko），
+     *     内核压根不认 virtio-blk，init 一直报 "partition(s) not found in /sys"；
+     *   - p9/p13 还是 GPT + super 动态分区，引擎挂的是整盘，路径也对不上；
+     *   - p9 的 first-stage init 只认设备树里的 fstab，p71 连 vendor 分区都没有。
+     * 三者实测都在 init 阶段起不来。列出来只会让用户选了就失败，因此暂不登记。
+     * 适配路径与阻塞点见 docs/方案B排障交接.md。
+     */
     val ALL: List<VmGuestImage> = listOf(
-        VmGuestImage("p71_arm64", "Android 7.1", 25, 292),
-        VmGuestImage("p9_arm64", "Android 9", 28, 393),
         VmGuestImage("p11_arm64", "Android 11", 30, 506),
-        VmGuestImage("p13_arm64", "Android 13", 33, 622),
     )
+
+    /** 规划中的版本（暂不可用），仅用于界面提示，不要放进 [ALL]。 */
+    val PLANNED_HINT: String = "Android 7.1 / 9 / 13 适配中"
 
     fun byTag(tag: String): VmGuestImage? = ALL.firstOrNull { it.tag == tag }
 

@@ -148,6 +148,338 @@ VMHOST_PY
         || { echo "!! GLDispatch 补丁未生效" >&2; exit 1; }
 fi
 
+# 4b) RenderThread 快照保存：两条补丁（一起打，逐条幂等靠 marker 判断）。
+#
+#   VMHOST_SNAP_NO_PAUSE —— save() 入口先看 mState：如果渲染线程**根本没被
+#     pausePreSnapshot() 碰过**（还是 Empty），waitForSnapshotCompletion()
+#     永远等不到 Finished。实测 opengles 管道就是这种情况：9 条线程全部
+#     state=0，各白等 5s，整次 save 多花 45s。直接按"没有渲染线程状态"降级
+#     （写 0），官方 load 侧把 0 当"无状态、渲染线程直接退出"。
+#
+#   VMHOST_SNAP_TIMEOUT —— 真被暂停过、但卡在某次 GL 调用里回不到主循环的
+#     兜底：waitForSnapshotCompletion() 给 5s 上限，超时同样降级写 0，
+#     而不是让整次 `vmhostsnapshot save` 挂死（实测早期版本顶到 HMP 180s
+#     超时、快照作废、ram.bin 只写一半）。
+f="$SRC_DIR/host/RenderThread.cpp"
+if grep -q "VMHOST_SNAP_TIMEOUT" "$f" && grep -q "VMHOST_SNAP_NO_PAUSE" "$f"; then
+    echo "==> patch: RenderThread 快照保存降级（已打过，跳过）"
+else
+    # 半套补丁会撞锚点：先还原成上游，再两条一起打。
+    git -C "$SRC_DIR" checkout -- host/RenderThread.cpp
+    python3 - "$f" <<'VMHOST_PY'
+import io, sys
+p = sys.argv[1]
+src = io.open(p, encoding='utf-8').read()
+
+old0 = """void RenderThread::save(android::base::Stream* stream) {
+    bool success;
+    {
+        AutoLock lock(mLock);
+        assert(mState == SnapshotState::StartSaving ||
+               mState == SnapshotState::InProgress ||
+               mState == SnapshotState::Finished);
+        waitForSnapshotCompletion(&lock);
+        success = mState == SnapshotState::Finished;
+    }
+"""
+new0 = """void RenderThread::save(android::base::Stream* stream) {
+    bool success;
+    {
+        AutoLock lock(mLock);
+        /* VMHOST_SNAP_NO_PAUSE: 没被 pausePreSnapshot() 碰过的线程（Empty）
+           等不到 Finished，直接降级成"没有状态"。 */
+        if (mState == SnapshotState::Empty) {
+            fprintf(stderr,
+                    "VMHOSTSNAP RenderThread::save: not paused (Empty), "
+                    "skip renderer state\\n");
+            success = false;
+        } else {
+            waitForSnapshotCompletion(&lock);
+            success = mState == SnapshotState::Finished;
+        }
+    }
+"""
+if old0 not in src:
+    sys.stderr.write("!! RenderThread::save 锚点未命中\n")
+    sys.exit(1)
+src = src.replace(old0, new0, 1)
+
+old = """void RenderThread::waitForSnapshotCompletion(AutoLock* lock) {
+    while (mState != SnapshotState::Finished &&
+           !mFinished.load(std::memory_order_relaxed)) {
+        mCondVar.wait(lock);
+    }
+}"""
+new = """void RenderThread::waitForSnapshotCompletion(AutoLock* lock) {
+    /* VMHOST_SNAP_TIMEOUT: 原版死等，渲染线程卡在 GL 调用里时整次 save 会挂死。
+       给 5s 上限；超时后按"没有渲染线程状态"降级（save() 会写 0），
+       后续 resume() 走的也是同一条超时路径，不会把渲染器永久留在暂停态。 */
+    const uint64_t deadlineUs = android::base::getUnixTimeUs() + 5ULL * 1000 * 1000;
+    while (mState != SnapshotState::Finished &&
+           !mFinished.load(std::memory_order_relaxed)) {
+        if (android::base::getUnixTimeUs() >= deadlineUs) {
+            fprintf(stderr,
+                    "VMHOSTSNAP RenderThread::waitForSnapshotCompletion timeout "
+                    "(state=%d), continue without renderer state\\n",
+                    (int) mState);
+            break;
+        }
+        /* AutoLock::mLock 是私有的（只对 ConditionVariable 开放），这里用
+           放锁 + 短睡轮询代替 timedWait：save 路径上 5ms 粒度足够，
+           而且不会把渲染器永久留在暂停态。 */
+        lock->unlock();
+#ifndef _WIN32
+        usleep(5 * 1000);
+#else
+        Sleep(5);
+#endif
+        lock->lock();
+    }
+}"""
+if old not in src:
+    sys.stderr.write("!! RenderThread 超时补丁锚点未命中\n")
+    sys.exit(1)
+io.open(p, 'w', encoding='utf-8').write(src.replace(old, new, 1))
+VMHOST_PY
+    grep -q "VMHOST_SNAP_TIMEOUT" "$f" && grep -q "VMHOST_SNAP_NO_PAUSE" "$f" \
+        && echo "==> patch: RenderThread 快照保存降级（未暂停直接跳过 + 5s 超时）" \
+        || { echo "!! RenderThread 快照补丁未生效" >&2; exit 1; }
+fi
+
+# 4c) 逐包打印的两处宿主诊断默认关掉（`VMHOST_GLES_LOG=1` 才打）。
+#     VMHOST_GLES1_OP（gles1 解码器，**每个包一行**）与 VMHOST_GLES2_LOWFREQ
+#     （gles2 解码器，名字叫"低频"但真实负载下每秒上千条）实测 2.5 分钟就能刷出
+#     21 万行、十几分钟 35MB 的 qemu-stderr.log —— 磁盘和 IO 全被日志吃掉。
+#     引擎侧 `setprop debug.vmhost.gles_log 1` 会把 VMHOST_GLES_LOG 传进来。
+patch_vmhost_gles_log_gate() {
+    local g1="$SRC_DIR/host/gl/gles1_dec/gles1_dec.cpp"
+    local g2="$SRC_DIR/host/gl/gles2_dec/gles2_dec.cpp"
+    [ -f "$g1" ] && [ -f "$g2" ] || { echo "找不到 gles1_dec/gles2_dec" >&2; return 1; }
+    if grep -q "VMHOST_GLES_LOG_GATE" "$g2"; then
+        echo "==> patch: 逐包 GLES 日志开关（已打过，跳过）"
+        return 0
+    fi
+    python3 - "$g1" "$g2" <<'VMHOST_PY'
+import io, sys
+g1p, g2p = sys.argv[1], sys.argv[2]
+
+src = io.open(g2p, encoding='utf-8').read()
+anchor = "static void vmhost_gles2_note(uint32_t opcode, uint32_t len, const unsigned char* p) {"
+gate = """/* VMHOST_GLES_LOG_GATE: 逐条打印默认关闭（见 build_gfxstream.sh 4c）。 */
+static bool vmhost_gles_log_on() {
+    static int enabled = -1;
+    if (enabled < 0) {
+        enabled = getenv("VMHOST_GLES_LOG") ? 1 : 0;
+    }
+    return enabled == 1;
+}
+
+"""
+if anchor not in src:
+    sys.stderr.write("!! gles2 note 锚点未命中\n"); sys.exit(1)
+src = src.replace(anchor, gate + anchor, 1)
+old = "    if (vmhost_gles2_lowfreq(opcode)) {"
+new = "    if (vmhost_gles_log_on() && vmhost_gles2_lowfreq(opcode)) {"
+if old not in src:
+    sys.stderr.write("!! gles2 lowfreq 锚点未命中\n"); sys.exit(1)
+src = src.replace(old, new, 1)
+if '#include <stdlib.h>' not in src:
+    src = src.replace('#include <string.h>',
+                      '#include <string.h>\n#include <stdlib.h>', 1)
+io.open(g2p, 'w', encoding='utf-8').write(src)
+
+src = io.open(g1p, encoding='utf-8').read()
+old1 = '\t\tfprintf(stderr, "VMHOST_GLES1_OP %u len=%u\\n", opcode, packetLen);\n'
+new1 = ('\t\t/* VMHOST_GLES_LOG_GATE: 逐包打印默认关闭（见 build_gfxstream.sh 4c） */\n'
+        '\t\t{ static int vmhostGlesLog = -1;\n'
+        '\t\t  if (vmhostGlesLog < 0) vmhostGlesLog = getenv("VMHOST_GLES_LOG") ? 1 : 0;\n'
+        '\t\t  if (vmhostGlesLog) fprintf(stderr, "VMHOST_GLES1_OP %u len=%u\\n", opcode, packetLen); }\n')
+if old1 not in src:
+    sys.stderr.write("!! gles1 逐包打印锚点未命中\n"); sys.exit(1)
+src = src.replace(old1, new1, 1)
+if '#include <stdlib.h>' not in src:
+    src = src.replace('#include <string.h>',
+                      '#include <string.h>\n#include <stdlib.h>', 1)
+io.open(g1p, 'w', encoding='utf-8').write(src)
+VMHOST_PY
+    grep -q "VMHOST_GLES_LOG_GATE" "$g2" && grep -q "VMHOST_GLES_LOG_GATE" "$g1" \
+        && echo "==> patch: 逐包 GLES 日志开关（VMHOST_GLES_LOG）" \
+        || { echo "!! GLES 日志开关补丁未生效" >&2; exit 1; }
+}
+
+# 注意：这个 gate 必须**在 5) 的 VMHOST_DIAG 插桩之后**调用 ——
+# gles2 的 vmhost_gles2_note()/LOWFREQ 打印是那一步插进去的，先跑会找不到锚点。
+
+# 4d) 渲染器**全局状态**的快照存取：把官方 android-emu 版 OpenglEsPipe 的做法
+#     接回 gfxstream 版。本版 gfxstream 把这段注释掉了 —— 新架构改由 virtio-gpu
+#     的 stream_renderer_snapshot_* 钩子触发，但那些钩子在本移植里没有任何调用方
+#     （`grep -rn stream_renderer_snapshot_save` 只有 end2end 测试命中）。后果：快照
+#     里只有 guest RAM + 设备状态，**没有渲染器状态**（EGL 上下文 / window surface /
+#     color buffer），恢复后 guest 的每条 GL 命令都打在空上下文上：
+#       GLESv2Imp.cpp:glDrawArrays:1601 error null ctx
+#       FB::flushEmulatedEglWindowSurfaceColorBuffer: window handle 0x9 not found
+#       FrameBuffer.cpp:3371: Failed to find process owned resources for puid 4294967295
+#     实测恢复后 5 分钟刷出 18 万行 / 30MB，guest 的界面等于废的。
+#     官方 emu 树同一文件（android/android-emu/android/opengl/OpenglEsPipe.cpp）
+#     里这段是活的：opengles service 的 preSave 里
+#       renderer->pauseAllPreSave(); putByte(1); putBe32(OPENGL_SAVE_VERSION);
+#       renderer->save(stream, Snapshotter::get().saver().textureSaver());
+#     preLoad 里 renderer->load(stream, Snapshotter::get().loader().textureLoader())。
+#     这里照它恢复（不搬 writeScreenshot：截图对恢复不是必需）。
+patch_opengles_renderer_snapshot() {
+    local f="$SRC_DIR/host/gl/gl-host-common/opengl/OpenglEsPipe.cpp"
+    [ -f "$f" ] || { echo "找不到 $f" >&2; return 1; }
+    if grep -q "VMHOST_RENDERER_SNAPSHOT" "$f"; then
+        echo "==> patch: opengles 渲染器状态快照（已打过，跳过）"
+        return 0
+    fi
+    python3 - "$f" <<'VMHOST_PY'
+import io, sys
+p = sys.argv[1]
+src = io.open(p, encoding='utf-8').read()
+
+if '#include "android/snapshot/Snapshotter.h"' not in src:
+    src = src.replace(
+        '#include "host-common/opengles.h"',
+        '#include "host-common/opengles.h"\n'
+        '#include "android/snapshot/Loader.h"\n'
+        '#include "android/snapshot/Saver.h"\n'
+        '#include "android/snapshot/Snapshotter.h"', 1)
+if 'using android::snapshot::Snapshotter;' not in src:
+    src = src.replace(
+        'using gfxstream::RenderChannelPtr;',
+        'using gfxstream::RenderChannelPtr;\nusing android::snapshot::Snapshotter;',
+        1)
+
+anchor_load = "        virtual void preLoad(android::base::Stream* stream) override {\n"
+insert_load = """            /* VMHOST_RENDERER_SNAPSHOT: 恢复渲染器全局状态（上下文/窗口/颜色缓冲）。
+               本版 gfxstream 把这段注释掉了，而 virtio-gpu 的 stream_renderer_snapshot_*
+               钩子在本移植里没有调用方 —— 不接回来，恢复后宿主渲染器就是"没有上下文"，
+               guest 的 GL 命令全部报 error null ctx。 */
+            const bool hasRenderer = stream->getByte();
+            const auto& renderer = android_getOpenglesRenderer();
+            if (hasRenderer != (bool)renderer || !hasRenderer) {
+                return;
+            }
+            const int vmhostVersion = stream->getBe32();
+            (void)vmhostVersion;
+            renderer->load(
+                stream,
+                android::snapshot::Snapshotter::get().loader().textureLoader());
+"""
+if anchor_load not in src:
+    sys.stderr.write("!! opengles preLoad 锚点未命中\n"); sys.exit(1)
+src = src.replace(anchor_load, anchor_load + insert_load, 1)
+
+anchor_save = "        void preSave(android::base::Stream* stream) override {\n"
+insert_save = """            /* VMHOST_RENDERER_SNAPSHOT: 保存渲染器全局状态。顺序与官方一致：
+               先 pauseAllPreSave()（把各渲染线程停在一致点），再写版本号 + 状态。
+               与 ASG 那条 globalPreSave 重复调用是安全的（release 下 assert 关掉，
+               pausePreSnapshot 幂等）；resume 由 postSave -> resumeAll() 负责。 */
+            if (const auto& renderer = android_getOpenglesRenderer()) {
+                renderer->pauseAllPreSave();
+                stream->putByte(1);
+                stream->putBe32(OPENGL_SAVE_VERSION);
+                renderer->save(
+                    stream,
+                    android::snapshot::Snapshotter::get().saver().textureSaver());
+            } else {
+                stream->putByte(0);
+            }
+"""
+if anchor_save not in src:
+    sys.stderr.write("!! opengles preSave 锚点未命中\n"); sys.exit(1)
+src = src.replace(anchor_save, anchor_save + insert_save, 1)
+
+io.open(p, 'w', encoding='utf-8').write(src)
+VMHOST_PY
+    grep -q "VMHOST_RENDERER_SNAPSHOT" "$f" \
+        && echo "==> patch: opengles 渲染器状态快照（preSave/preLoad）" \
+        || { echo "!! opengles 渲染器快照补丁未生效" >&2; exit 1; }
+}
+
+patch_opengles_renderer_snapshot
+
+# 4e) 渲染器快照的**耗时探针**。接回渲染器状态后保存从 2s 变成 92s —— 先量清楚
+#     时间花在 pauseAllPreSave / renderer->save / resumeAll 哪一段，再决定怎么优化。
+patch_opengles_renderer_snapshot_timing() {
+    local f="$SRC_DIR/host/gl/gl-host-common/opengl/OpenglEsPipe.cpp"
+    [ -f "$f" ] || { echo "找不到 $f" >&2; return 1; }
+    if grep -q "VMHOST_RENDERER_SNAPSHOT_TIMING" "$f"; then
+        echo "==> patch: 渲染器快照计时（已打过，跳过）"
+        return 0
+    fi
+    python3 - "$f" <<'VMHOST_PY'
+import io, sys
+p = sys.argv[1]
+src = io.open(p, encoding='utf-8').read()
+
+if '#include <chrono>' not in src:
+    src = src.replace('#include <atomic>',
+                      '#include <atomic>\n#include <chrono>', 1)
+
+old = """            if (const auto& renderer = android_getOpenglesRenderer()) {
+                renderer->pauseAllPreSave();
+                stream->putByte(1);
+                stream->putBe32(OPENGL_SAVE_VERSION);
+                renderer->save(
+                    stream,
+                    android::snapshot::Snapshotter::get().saver().textureSaver());
+            } else {
+                stream->putByte(0);
+            }
+"""
+new = """            if (const auto& renderer = android_getOpenglesRenderer()) {
+                /* VMHOST_RENDERER_SNAPSHOT_TIMING */
+                auto vmhostT0 = std::chrono::steady_clock::now();
+                renderer->pauseAllPreSave();
+                auto vmhostT1 = std::chrono::steady_clock::now();
+                stream->putByte(1);
+                stream->putBe32(OPENGL_SAVE_VERSION);
+                renderer->save(
+                    stream,
+                    android::snapshot::Snapshotter::get().saver().textureSaver());
+                auto vmhostT2 = std::chrono::steady_clock::now();
+                fprintf(stderr,
+                        "VMHOSTSNAP renderer preSave: pause=%.0fms save=%.0fms\\n",
+                        std::chrono::duration<double, std::milli>(vmhostT1 - vmhostT0).count(),
+                        std::chrono::duration<double, std::milli>(vmhostT2 - vmhostT1).count());
+            } else {
+                stream->putByte(0);
+            }
+"""
+if old not in src:
+    sys.stderr.write("!! preSave 计时锚点未命中\n"); sys.exit(1)
+src = src.replace(old, new, 1)
+
+old2 = """        void postSave(android::base::Stream* stream) override {
+            if (const auto& renderer = android_getOpenglesRenderer()) {
+                renderer->resumeAll();
+            }
+"""
+new2 = """        void postSave(android::base::Stream* stream) override {
+            if (const auto& renderer = android_getOpenglesRenderer()) {
+                /* VMHOST_RENDERER_SNAPSHOT_TIMING */
+                auto vmhostT0 = std::chrono::steady_clock::now();
+                renderer->resumeAll();
+                fprintf(stderr, "VMHOSTSNAP renderer postSave: resume=%.0fms\\n",
+                        std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() - vmhostT0).count());
+            }
+"""
+if old2 not in src:
+    sys.stderr.write("!! postSave 计时锚点未命中\n"); sys.exit(1)
+src = src.replace(old2, new2, 1)
+
+io.open(p, 'w', encoding='utf-8').write(src)
+VMHOST_PY
+    grep -q "VMHOST_RENDERER_SNAPSHOT_TIMING" "$f" \
+        && echo "==> patch: 渲染器快照计时探针" \
+        || { echo "!! 渲染器快照计时补丁未生效" >&2; exit 1; }
+}
+
+patch_opengles_renderer_snapshot_timing
+
 # 5) 宿主侧诊断插桩（VMHOST_DIAG 系列）：GLES2 命令直方图/环形缓冲、
 #    ColorBuffer 的 blit 与 readback 探针、TextureDraw 链接结果、FrameBuffer::post 打点。
 #    逐条幂等（marker 命中即跳过），锚点未命中只告警不中断 —— 诊断插桩不是构建必需。
@@ -164,6 +496,9 @@ if [ "${VMHOST_DIAG:-1}" = "1" ] && [ -f "$TOOLS_DIR/qemu_patches/patch_vmhost_d
 else
     echo "==> VMHOST_DIAG=0：跳过宿主侧诊断插桩（干净基线）"
 fi
+
+# 4c) 逐包 GLES 日志开关（必须在 5) 之后调用，见上面的说明）
+patch_vmhost_gles_log_gate
 
 # 5b) VMHOST_BINDCTX：定位"谁把上下文绑成没有 surface 的"（D15 结论）。
 #     宿主 Adreno 830 驱动在"上下文有效但 draw/read surface = NULL"时会于固定指令
@@ -535,6 +870,20 @@ VMHOST_PY5
         || { echo "!! VMHOST_RC 补丁未生效" >&2; exit 1; }
 fi
 
+# 5f) VMHOST_LEAKREG：修掉 gfxstream **退出时**的静态析构竞态（SIGABRT）。
+#     RenderThreadInfo 的全局注册表 `sRegistry` 在进程退出时会被析构（Lock 里的
+#     mutex 被销毁），而仍在收尾的 RenderThread 会在 `~RenderThreadInfo()` 里
+#     `AutoLock lock(sRegistry.lock)` → FORTIFY abort：
+#       F libc: FORTIFY: pthread_mutex_lock called on a destroyed mutex
+#     → QEMU 以 SIGABRT 退出（不是干净退出，cache=unsafe 下有脏盘风险）。
+#     改成**堆上分配、永不释放**，析构顺序问题从根上消失。见 §22.5。
+if [ "${VMHOST_LEAKREG:-1}" = "0" ]; then
+    echo "==> VMHOST_LEAKREG=0：跳过（二分用）"
+else
+    python3 "$TOOLS_DIR/qemu_patches/patch_gfxstream_threadinfo.py" "$SRC_DIR" || {
+        echo "!! VMHOST_LEAKREG 补丁失败" >&2; exit 1; }
+fi
+
 # ---------------------------------------------------------------- 1. configure
 # 宿主侧需要 <cutils/native_handle.h>（AOSP 头，NDK 没有；仓内自带一份）。
 # 只把这一个头拷进 shim 目录，避免把 android_stub 整目录挂上来遮蔽 NDK 头。
@@ -542,6 +891,69 @@ SHIM_DIR="$BUILD_DIR/vmhost-shim"
 mkdir -p "$SHIM_DIR/cutils"
 cp -f "$SRC_DIR/guest/mesa/include/android_stub/cutils/native_handle.h" \
       "$SHIM_DIR/cutils/native_handle.h"
+
+# OpenglEsPipe 的渲染器状态快照要 `#include "android/snapshot/{Snapshotter,Saver,Loader}.h"`。
+# 完整版在这几个头只在 QEMU 树的 android/android-emu 下（aemu/snapshot/include 里
+# 只有 TextureSaver/TextureLoader 那几个接口头）。只把 android/snapshot 这一个子目录
+# 链进 shim，避免把整个 android-emu 头根挂上来遮蔽别的 android/* 头。
+QEMU_ANDROID_EMU_DIR="${QEMU_ANDROID_EMU_DIR:-$WORKDIR/qemu-aosp/android/android-emu}"
+if [ -d "$QEMU_ANDROID_EMU_DIR/android/snapshot" ]; then
+    mkdir -p "$SHIM_DIR/android"
+    ln -sfn "$QEMU_ANDROID_EMU_DIR/android/snapshot" "$SHIM_DIR/android/snapshot"
+    echo "==> shim: android/snapshot -> $QEMU_ANDROID_EMU_DIR/android/snapshot"
+else
+    echo "!! 找不到 $QEMU_ANDROID_EMU_DIR/android/snapshot（渲染器状态快照会编不过）" >&2
+    exit 1
+fi
+# 那些 snapshot 头还会 `#include "android/base/system/System.h"` 这类老路径
+# （aemu 侧对应 aemu/base/...）。兼容头在 qemu-aosp/android/emu/base/include/android/base 下。
+QEMU_EMU_BASE_INCLUDE="${QEMU_EMU_BASE_INCLUDE:-$WORKDIR/qemu-aosp/android/emu/base/include}"
+if [ -d "$QEMU_EMU_BASE_INCLUDE/android/base" ]; then
+    mkdir -p "$SHIM_DIR/android"
+    ln -sfn "$QEMU_EMU_BASE_INCLUDE/android/base" "$SHIM_DIR/android/base"
+    echo "==> shim: android/base -> $QEMU_EMU_BASE_INCLUDE/android/base"
+else
+    echo "!! 找不到 $QEMU_EMU_BASE_INCLUDE/android/base" >&2
+    exit 1
+fi
+# snapshot 头还会拉 avd/utils/agents/... 这些 emu 侧的兼容头，逐个链进来
+# （不整根挂 android-emu，避免遮蔽 gfxstream 自己的 android/* 头）。
+for _m in avd agents cmdline crashreport files feature metrics protobuf \
+          studio-config utils; do
+    # 优先用 android-emu-base 那份兼容头（android/utils/debug.h 等只在那里），
+    # 没有再退回 emu/<m>/include 的版本。
+    _src="$WORKDIR/qemu-aosp/android/android-emu-base/android/$_m"
+    [ -d "$_src" ] || _src="$WORKDIR/qemu-aosp/android/emu/$_m/include/android/$_m"
+    [ -d "$_src" ] && ln -sfn "$_src" "$SHIM_DIR/android/$_m"
+done
+echo "==> shim: android/{avd,agents,cmdline,crashreport,files,feature,metrics,protobuf,studio-config,utils}"
+# 上面这些头会经 aemu 的 Log.h 拉 absl（str_format 等），把 absl 也链进 shim。
+ABSEIL_DIR="${ABSEIL_DIR:-$WORKDIR/abseil}"
+if [ -d "$ABSEIL_DIR/absl" ]; then
+    ln -sfn "$ABSEIL_DIR/absl" "$SHIM_DIR/absl"
+    echo "==> shim: absl -> $ABSEIL_DIR/absl"
+else
+    echo "!! 找不到 $ABSEIL_DIR/absl" >&2
+    exit 1
+fi
+# snapshot 头还会拉生成的 protobuf 头（snapshot.pb.h 等）与 protobuf 运行库头。
+PROTO_GEN_DIR="${PROTO_GEN_DIR:-$WORKDIR/proto-gen}"
+PROTOBUF_INCLUDE_DIR="${PROTOBUF_INCLUDE_DIR:-$WORKDIR/protobuf-build-arm64-v8a/include}"
+for _h in snapshot.pb.h snapshot_deps.pb.h emulator_compatible.pb.h; do
+    [ -f "$PROTO_GEN_DIR/$_h" ] && ln -sfn "$PROTO_GEN_DIR/$_h" "$SHIM_DIR/$_h"
+done
+[ -d "$PROTOBUF_INCLUDE_DIR/google" ] && \
+    ln -sfn "$PROTOBUF_INCLUDE_DIR/google" "$SHIM_DIR/google"
+# Compressor.h 用 lz4（快照压缩）。
+for _lz4 in "$WORKDIR/lz4-build-arm64-v8a/include" "$WORKDIR/lz4/lib" \
+            "$WORKDIR/lz4/include"; do
+    if [ -f "$_lz4/lz4.h" ]; then
+        ln -sfn "$_lz4/lz4.h" "$SHIM_DIR/lz4.h"
+        break
+    fi
+done
+[ -f "$SHIM_DIR/lz4.h" ] || { echo "!! 找不到 lz4.h" >&2; exit 1; }
+echo "==> shim: protobuf 生成头 + google/ + lz4 已挂载"
 
 echo "==> configure"
 cmake -S "$SRC_DIR" -B "$BUILD_DIR" -G Ninja \
@@ -558,7 +970,7 @@ cmake -S "$SRC_DIR" -B "$BUILD_DIR" -G Ninja \
     -DWITH_BENCHMARK=OFF \
     -DBUILD_GRAPHICS_DETECTOR=OFF \
     -DCMAKE_C_FLAGS="-DANDROID" \
-    -DCMAKE_CXX_FLAGS="-DANDROID" \
+    -DCMAKE_CXX_FLAGS="-DANDROID ${VMHOST_CRASH_FP:+-fno-omit-frame-pointer}" \
     -DCMAKE_PROJECT_INCLUDE="$DEPS_CMAKE" \
     -DVMHOST_AEMU_DIR="$AEMU_DIR" \
     -DVMHOST_AEMU_LIB_DIR="$AEMU_LIB_DIR" \

@@ -3,6 +3,12 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- 实例运行时挂前台服务：保住进程等级与 CPU 核（见 VmInstanceServiceBase） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 应用内自更新：下载新版 APK 后调起系统安装器 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <application
         android:allowBackup="false"
@@ -87,6 +93,51 @@
                 android:value="vmengine" />
         </activity>
 
+        <!--
+            实例前台服务：与对应的 VmNativeActivityN 同进程，保证访客运行期间
+            进程不被降级到 background cpuset、也不被冻结。
+            Android 14+ 强制要求声明 foregroundServiceType，虚拟机归 specialUse。
+        -->
+        <service
+            android:name=".instance.VmInstanceService1"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:process=":vm1">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="virtual machine guest runtime" />
+        </service>
+
+        <service
+            android:name=".instance.VmInstanceService2"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:process=":vm2">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="virtual machine guest runtime" />
+        </service>
+
+        <service
+            android:name=".instance.VmInstanceService3"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:process=":vm3">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="virtual machine guest runtime" />
+        </service>
+
+        <service
+            android:name=".instance.VmInstanceService4"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:process=":vm4">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="virtual machine guest runtime" />
+        </service>
+
         <!-- 访客网络：宿主侧 tun，供引擎的 slirp 桥接 -->
         <service
             android:name=".net.VmNetworkService"
@@ -96,6 +147,17 @@
                 <action android:name="android.net.VpnService" />
             </intent-filter>
         </service>
+
+        <!-- 自更新：把 cacheDir/update 下的 APK 通过 content:// 交给系统安装器 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
     </application>
 

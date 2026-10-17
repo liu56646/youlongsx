@@ -18,6 +18,7 @@
  */
 
 #include "vm_qemu.h"
+#include "vm_qmp.h"
 #include "vmhost_control.h"
 
 #include <pthread.h>
@@ -30,6 +31,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
+#include <sys/system_properties.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <android/log.h>
@@ -53,6 +57,7 @@ static bool s_started = false;
 static bool s_running = false;
 static bool s_finished = false;   /* QEMU 主循环已返回、线程即将结束 */
 static bool s_joined = false;     /* 线程已 join，避免重复 join */
+static bool s_child_mode = false; /* 本次是 fork/exec 子进程模式（B1），不是进程内嵌 */
 static int  s_argc = 0;
 static char s_args[MAX_ARGS][ARG_CAP];
 static char *s_argv[MAX_ARGS + 1];
@@ -194,14 +199,31 @@ static bool self_lib_dir(char *out, size_t out_len)
     return true;
 }
 
-/** 追加一块 virtio-blk（MMIO）。磁盘的先后顺序决定访客里的 vda/vdb/... */
+/** 追加一块 virtio-blk。磁盘的先后顺序决定访客里的 vda/vdb/...
+ *
+ * 默认走 MMIO（virtio-blk-device），可用环境变量 VMHOST_BLK_PCI=1 切到 PCI
+ * （virtio-blk-pci）。真机实测结论：
+ *   - p11 能用，是因为它的 ramdisk 里带了 `/lib/modules/virtio_blk.ko`
+ *     （console.log 可见 "Loaded kernel module .../virtio_blk.ko"），内核才有
+ *     virtio-blk 能力；此时 MMIO 就能认盘，且盘符是**反序**（先加的 data 落到
+ *     vdf），p11 的 fstab 就是按反序写的。
+ *   - p9/p13 的 SDK 原版 ramdisk **没有 virtio_blk.ko**，所以无论 MMIO 还是
+ *     PCI，console.log 里连 "virtio" 字样都不出现（init 一直报
+ *     "partition(s) not found in /sys"）。它们缺的是**内核模块**，不是传输方式。
+ *   - 切到 PCI 时盘符变**正序**（vda=data、vdf=system），fstab 要跟着反过来写。 */
+static bool blk_use_pci(void)
+{
+    const char *v = getenv("VMHOST_BLK_PCI");
+    return v != NULL && v[0] == '1';
+}
+
 static void add_blk_dev(const char *id, const char *path, bool readonly)
 {
     add_arg("%s", "-drive");
     add_arg("if=none,id=%s,file=%s,format=raw%s,cache=unsafe",
             id, path, readonly ? ",readonly=on" : "");
     add_arg("%s", "-device");
-    add_arg("virtio-blk-device,drive=%s", id);
+    add_arg(blk_use_pci() ? "virtio-blk-pci,drive=%s" : "virtio-blk-device,drive=%s", id);
 }
 
 /** 子进程 QEMU 是否还活着（顺带回收，并记录退出原因）。 */
@@ -234,32 +256,419 @@ static bool child_alive(void)
 }
 
 /** 拼参数并 fork/exec 出子进程 QEMU。返回 0 成功。 */
+/* ------------------------------------------------------------------ */
+/* 快照恢复的 unix socket 中转                                          */
+/* ------------------------------------------------------------------ */
+/*
+ * QEMU 2.12 的迁移通道实测结论：
+ *   - `file:` 直接被拒（"expects a valid migration protocol"）
+ *   - `exec:dd if=` / `exec:cat` / `exec:sh + 双向吞咽` 全部以
+ *     "load of migration failed: I/O error" 结束（exec 通道只有单向语义）
+ *   - 只有 unix:/tcp: 是**原生双向**通道
+ *
+ * 关键（源码佐证 migration/socket.c 的 socket_start_incoming_migration）：
+ *   `-incoming unix:<path>` 里 **QEMU 自己是 server** —— 它调
+ *   qio_net_listener_open_sync() 去 bind+listen 该路径。
+ *   所以 App 必须反过来做 **client**：先删掉残留的 socket 文件，
+ *   等 QEMU 把监听建起来，再 connect 上去把快照喂进去。
+ *   （最早按"App 当 server"写，等于和 QEMU 抢同一个路径，QEMU 监听失败，
+ *    表现就是 App 永远 accept 不到、QEMU 报 load failed。）
+ */
+static char s_snap_sock[ARG_CAP];
+static char s_snap_file[ARG_CAP];
+/* 本次启动是否走「快照恢复」，以及恢复是否已判定失败。
+   恢复失败 = 子进程早早退出（迁移流没被接受），上层据此删档回退冷启动。 */
+static bool s_restoring = false;
+
+static void snap_prepare(const char *sock_path)
+{
+    /* 清掉上次残留的 socket 文件，否则 QEMU bind 会 Address already in use */
+    unlink(sock_path);
+}
+
+static void *snap_feed_thread(void *arg)
+{
+    (void) arg;
+
+    /* 等 QEMU 把监听建起来，再连上去（最多重试 ~20 秒） */
+    int cfd = -1;
+    for (int i = 0; i < 200 && cfd < 0; i++) {
+        const int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (fd < 0) {
+            LOGE("快照中转：socket 失败 %s", strerror(errno));
+            return NULL;
+        }
+        struct sockaddr_un sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sun_family = AF_UNIX;
+        snprintf(sa.sun_path, sizeof(sa.sun_path), "%s", s_snap_sock);
+        if (connect(fd, (const struct sockaddr *) &sa, sizeof(sa)) == 0) {
+            cfd = fd;
+            break;
+        }
+        close(fd);
+        usleep(100 * 1000);
+    }
+    if (cfd < 0) {
+        LOGE("快照中转：连不上 QEMU 的迁移 socket %s", s_snap_sock);
+        return NULL;
+    }
+    LOGI("快照中转：已连上 QEMU，开始喂 %s", s_snap_file);
+
+    FILE *fp = fopen(s_snap_file, "rb");
+    if (fp == NULL) {
+        LOGE("快照中转：打不开快照 %s", s_snap_file);
+        close(cfd);
+        return NULL;
+    }
+    char buf[64 * 1024];
+    unsigned long long total = 0;
+    for (;;) {
+        const size_t n = fread(buf, 1, sizeof(buf), fp);
+        if (n == 0) {
+            break;
+        }
+        size_t off = 0;
+        while (off < n) {
+            const ssize_t w = write(cfd, buf + off, n - off);
+            if (w <= 0) {
+                LOGE("快照中转：写 socket 失败（已喂 %llu 字节）", total);
+                goto done;
+            }
+            off += (size_t) w;
+        }
+        total += n;
+    }
+    LOGI("快照中转：喂完 %llu 字节", total);
+done:
+    fclose(fp);
+    close(cfd);
+    return NULL;
+}
+
+/* ------------------------------------------------------------------ */
+/* 模拟器快照（aemu Snapshotter）：通过 QMP 触发                          */
+/* ------------------------------------------------------------------ */
+/*
+ * 与上面那条「snapshot.bin + -incoming」不同，这是模拟器自己的 quickboot 路径：
+ * QEMU 侧由 `vmhostsnapshot`（build_qemu_aosp.sh 里补丁注册的 HMP 命令）调 aemu
+ * 的 Snapshotter，把 guest RAM + 设备状态 + 宿主渲染器状态一起存/取。
+ *
+ * 引擎这边只做三件事：
+ *   1) 启动后若存在 <dataDir>/snapshot.state（= 上次保存成功）就发 load；
+ *      失败就删标记、本次按冷启动继续 —— 不给用户留黑屏。
+ *   2) 停机前先把 guest 冻住（QMP stop），再 save；成功才写标记。
+ *      **必须落在静止点**：否则磁盘已经往前走、而快照 RAM 还停在过去，ext4 会坏。
+ *   3) 命令不存在（现役引擎都还没有）时只记一次日志，绝不影响正常启动/停机。
+ *
+ * A/B 开关：`setprop debug.vmhost.snapshot 0` 可整体关掉。
+ */
+
+#define VMHOST_SNAP_NAME     "default_boot"
+#define SNAP_SAVE_TIMEOUT_MS 180000
+#define SNAP_LOAD_TIMEOUT_MS 180000
+#define SNAP_STATE_MAGIC     "vmhost-snapshot-v1\n"
+
+static char s_snap_state_file[ARG_CAP];   /* <dataDir>/snapshot.state */
+static bool s_snap_cmd_missing = false;   /* 本版 QEMU 没有 vmhostsnapshot 命令 */
+
+/** 由 userdata 路径推出 <dataDir>/snapshot.state。 */
+static void snap_state_path_from(const char *userdata_path, char *out, size_t cap)
+{
+    out[0] = '\0';
+    if (userdata_path == NULL) {
+        return;
+    }
+    snprintf(out, cap, "%s", userdata_path);
+    char *slash = strrchr(out, '/');
+    if (slash == NULL) {
+        out[0] = '\0';
+        return;
+    }
+    snprintf(slash + 1, cap - (size_t) (slash + 1 - out), "snapshot.state");
+}
+
+/** 快照总开关（默认开，`debug.vmhost.snapshot=0` 关）。 */
+static bool snap_enabled(void)
+{
+    char v[PROP_VALUE_MAX] = {0};
+    if (__system_property_get("debug.vmhost.snapshot", v) > 0 &&
+        v[0] == '0' && v[1] == '\0') {
+        return false;
+    }
+    return true;
+}
+
+/**
+ * 发一条 HMP 命令（经 QMP human-monitor-command）。
+ * @return 0=成功；1=HMP 报错；2=没有这条命令；-1=连接/超时
+ */
+static int hmp_run(const char *cmdline, char *out, size_t out_cap, int timeout_ms)
+{
+    char args[512];
+    char reply[4096];
+    reply[0] = '\0';
+    snprintf(args, sizeof(args), "{\"command-line\":\"%s\"}", cmdline);
+    const int rc = vm_qmp_request("human-monitor-command", args,
+                                  reply, sizeof(reply), timeout_ms);
+    if (out != NULL && out_cap > 0) {
+        snprintf(out, out_cap, "%s", reply);
+    }
+    /* 老引擎里没有这条 HMP 命令：QEMU 会回 CommandNotFound / "... not been found" */
+    if (strstr(reply, "CommandNotFound") != NULL ||
+        strstr(reply, "not been found") != NULL) {
+        return 2;
+    }
+    return rc;
+}
+
+static int snap_hmp(const char *op, char *out, size_t out_cap, int timeout_ms)
+{
+    char cmd[128];
+    snprintf(cmd, sizeof(cmd), "vmhostsnapshot %s %s", op, VMHOST_SNAP_NAME);
+    return hmp_run(cmd, out, out_cap, timeout_ms);
+}
+
+/** 连上 QMP（拿不到 socket 路径或连不上时返回 false）。 */
+static bool snap_qmp_connect(void)
+{
+    char qmp[ARG_CAP];
+    if (!vm_qemu_qmp_path(qmp, sizeof(qmp))) {
+        return false;
+    }
+    return vm_qmp_connect(qmp);
+}
+
+/**
+ * 停机前保存快照：冻住 guest → save → 写标记。
+ * 全程失败都只是记日志 —— 停机流程不能因为快照失败而卡住。
+ */
+static void snap_try_save(void)
+{
+    if (s_snap_cmd_missing || s_snap_state_file[0] == '\0' || !snap_enabled()) {
+        return;
+    }
+    if (!snap_qmp_connect()) {
+        LOGW("快照：连不上 QMP，跳过保存");
+        return;
+    }
+
+    /* 1) 先冻住 guest：快照必须落在静止点，磁盘与 RAM 才同点 */
+    if (vm_qmp_request("stop", NULL, NULL, 0, 5000) < 0) {
+        LOGW("快照：QMP stop 未成功，跳过保存");
+        return;
+    }
+
+    /* 2) 保存 */
+    char out[4096];
+    const int rc = snap_hmp("save", out, sizeof(out), SNAP_SAVE_TIMEOUT_MS);
+    if (rc == 2) {
+        s_snap_cmd_missing = true;
+        LOGI("本版引擎没有 vmhostsnapshot 命令，跳过快照（不影响停机）");
+        return;
+    }
+    if (rc != 0) {
+        LOGE("快照保存失败（rc=%d）：%s", rc, out);
+        return;
+    }
+
+    /* HMP 层的失败是以**文本**回来的：QMP 信封仍然是 {"return": "..."}，
+       只有 human-monitor-command 的返回值里才写着
+       "vmhostsnapshot: save 'x' failed: ..."。只看 QMP 信封会把失败当成功
+       （实测踩到：引擎记下"已保存"，盘上其实什么都没有）。 */
+    if (strstr(out, "failed") != NULL) {
+        LOGE("快照保存失败（HMP）：%s", out);
+        return;
+    }
+
+    /* 3) 写标记：下次启动据此发 load */
+    FILE *fp = fopen(s_snap_state_file, "wb");
+    if (fp != NULL) {
+        fputs(SNAP_STATE_MAGIC, fp);
+        fclose(fp);
+        LOGI("快照已保存：%s", s_snap_state_file);
+    } else {
+        LOGW("快照已保存但标记文件写不出来：%s", s_snap_state_file);
+    }
+}
+
+/** 启动后尝试恢复：等 QMP 起来 → load；失败删标记并放行 guest。 */
+static void *snap_load_thread(void *arg)
+{
+    (void) arg;
+
+    /* 连接和请求都要重试。QEMU 刚 spawn 出来时它的 QMP socket 可能还没 bind
+       好；更坑的是可能连到上一次运行残留的 socket —— 实测 connect 会成功、
+       紧接着 write 就失败（EPIPE），一次就放弃会让恢复永远失败。 */
+    char out[4096];
+    int rc = -1;
+    for (int attempt = 0; attempt < 8; attempt++) {
+        if (!vm_qmp_is_connected()) {
+            if (!snap_qmp_connect()) {
+                usleep(1000 * 1000);
+                continue;
+            }
+        }
+        out[0] = '\0';
+        rc = snap_hmp("load", out, sizeof(out), SNAP_LOAD_TIMEOUT_MS);
+        if (rc == 0) {
+            /* 同 save：HMP 的失败藏在返回值文本里，不能只看 QMP 信封。 */
+            if (strstr(out, "failed") != NULL) {
+                rc = 1;
+            }
+            break;
+        }
+        /* 连接坏了（-1）就断开重连再试；命令不存在（2）/执行失败（1）不重试。 */
+        if (rc != -1) {
+            break;
+        }
+        vm_qmp_disconnect();
+        usleep(1000 * 1000);
+    }
+
+    if (rc == 0) {
+        LOGI("已从快照恢复（%s）", VMHOST_SNAP_NAME);
+        /* 恢复成功也要放行 guest。QEMU 是以 -S（暂停）起来的，而
+           load_snapshot() 只在「load 之前 VM 已经在跑」时才自己 vm_start()
+           （migration/savevm.c 的 saved_vm_running 分支）—— 我们这条路径不满足，
+           实测恢复后 QEMU CPU 0%、console.log 不增长，表现就是黑屏。
+           这里补一发 cont，和失败分支共用同一套重连/重试。 */
+        for (int attempt = 0; attempt < 5; attempt++) {
+            if (!vm_qmp_is_connected() && !snap_qmp_connect()) {
+                usleep(1000 * 1000);
+                continue;
+            }
+            if (vm_qmp_request("cont", NULL, NULL, 0, 5000) >= 0) {
+                LOGI("快照恢复后已放行 guest");
+                break;
+            }
+            vm_qmp_disconnect();
+            usleep(1000 * 1000);
+        }
+        return NULL;
+    }
+
+    LOGE("快照恢复失败（rc=%d）：%s", rc, out);
+    if (rc == 2) {
+        s_snap_cmd_missing = true;
+    }
+    unlink(s_snap_state_file);          /* 坏快照不留：下次直接冷启动 */
+
+    /* 有快照标记时 QEMU 是以 -S（暂停）起来的：这里必须把 guest 放行，
+       否则它会一直停着（表现就是黑屏）。同样要重试 + 重连 —— 连不上就再来一次。 */
+    for (int attempt = 0; attempt < 5; attempt++) {
+        if (!vm_qmp_is_connected() && !snap_qmp_connect()) {
+            usleep(1000 * 1000);
+            continue;
+        }
+        if (vm_qmp_request("cont", NULL, NULL, 0, 5000) >= 0) {
+            LOGI("已放行 guest（本次按冷启动继续）");
+            break;
+        }
+        vm_qmp_disconnect();
+        usleep(1000 * 1000);
+    }
+    return NULL;
+}
+
+/**
+ * /dev/kvm 是否真能打开。这是「切 KVM 后端」的最后一道核对：
+ * 节点存在 ≠ 可用（应用沙箱里 SELinux 可能拒绝，占位节点 open 返回 ENODEV）。
+ * 引擎进程无特权时这里会失败，从而安全回退 TCG，绝不会带病上 KVM。
+ */
+static bool kvm_dev_available(void)
+{
+    int fd = open("/dev/kvm", O_RDWR | O_CLOEXEC);
+    if (fd < 0) {
+        LOGW("kvm: open /dev/kvm 失败（%s），回退 TCG", strerror(errno));
+        return false;
+    }
+    close(fd);
+    return true;
+}
+
 static int spawn_qemu_child(const VmQemuParams *p, const char *exe_path, const char *lib_dir)
 {
     const int mem = (p->memory_mb > 0) ? p->memory_mb : 2048;
     const int cores = (p->cores > 0) ? p->cores : 4;
 
+    /* aemu 快照的标记文件（<dataDir>/snapshot.state）：存在 = 上次保存成功 */
+    snap_state_path_from(p->userdata_img_path, s_snap_state_file,
+                         sizeof(s_snap_state_file));
+
+    /* 后端选择：请求了 KVM 且 /dev/kvm 真能打开 → 硬件加速；否则 TCG（现状）。
+       MTTCG 相关注释保留在下方 TCG 分支，KVM 分支用 host CPU。 */
+    const bool want_kvm = p->backend_name &&
+                          strcmp(p->backend_name, "KVM") == 0 &&
+                          kvm_dev_available();
+
     s_argc = 0;
+    s_child_mode = true;
+    s_restoring = false;   /* 只有在下面真的挂上 -incoming 时才置位 */
     add_arg("%s", "qemu-system-aarch64");
-    /* MTTCG（多线程 TCG）。
-       实测与源码核实（真机 cc96ded5，见 docs/方案B排障交接.md §21）：
-       1) `thread=multi` 被本版 QEMU 接受，且 MTTCG 确实生效：本仓 QEMU 的
-          configure 对 aarch64 目标就是 `mttcg="yes"`（aarch64-softmmu/
-          config-target.mak 里有 TARGET_SUPPORTS_MTTCG=y），运行时 cpus.c 的
-          qemu_tcg_init_vcpu() 会为每个 vCPU 建独立线程 —— `-smp 6` 时可观察
-          到 6 条 "CPU n/TCG" 线程，且能抓到两条 vCPU 线程同时忙。
-          注意：boot 前中期 `top -H` 里常只见 1 条 vCPU 线程忙，那是 guest
-          boot 流程天然串行的**负载形状**，不代表 MTTCG 没开。
-       2) `tb-size` **不是本版 tcg accel 的合法参数**：加上它 QEMU 会直接
-          `Invalid parameter 'tb-size'` 并以 code=1 退出（本仓 QEMU 的 -accel
-          实现约当 2.10，那时 tb-size 还没进 tcg accel）。所以翻译块缓存
-          大小不可运行时调，只能吃编译期默认值。 */
-    add_arg("%s", "-accel");
-    add_arg("%s", "tcg,thread=multi");
+    if (want_kvm) {
+        LOGI("kvm: 使用 KVM 加速（-accel kvm -cpu host）");
+        add_arg("%s", "-accel");
+        add_arg("%s", "kvm");
+    } else {
+        if (p->backend_name && strcmp(p->backend_name, "KVM") == 0) {
+            LOGW("kvm: 请求了 KVM 但不可用，已回退 TCG");
+        }
+        /* MTTCG（多线程 TCG）。
+           实测与源码核实（真机 cc96ded5，见 docs/方案B排障交接.md §21）：
+           1) `thread=multi` 被本版 QEMU 接受，且 MTTCG 确实生效：本仓 QEMU 的
+              configure 对 aarch64 目标就是 `mttcg="yes"`（aarch64-softmmu/
+              config-target.mak 里有 TARGET_SUPPORTS_MTTCG=y），运行时 cpus.c 的
+              qemu_tcg_init_vcpu() 会为每个 vCPU 建独立线程 —— `-smp 6` 时可观察
+              到 6 条 "CPU n/TCG" 线程，且能抓到两条 vCPU 线程同时忙。
+              注意：boot 前中期 `top -H` 里常只见 1 条 vCPU 线程忙，那是 guest
+              boot 流程天然串行的**负载形状**，不代表 MTTCG 没开。 */
+        add_arg("%s", "-accel");
+        add_arg("%s", "tcg,thread=multi");
+    }
+
+    /* 有快照时用「暂停启动」：aemu 的 Snapshotter::load() 要求 guest 还没开始
+       执行 —— 我们 spawn 完就去 load，若此时 guest 已经在跑，状态会打架。
+       load 成功由 Snapshotter 自己把 VM 跑起来；失败则由 snap_load_thread
+       发 `cont` 放行，退回冷启动。没有快照时这条不加，行为与以前完全一致。 */
+    if (file_ok(s_snap_state_file)) {
+        add_arg("%s", "-S");
+        LOGI("检测到快照标记，QEMU 以 -S（暂停）启动，随后尝试 load");
+    }
+
+    /* 翻译块缓存（TB cache）大小，单位 MB。
+       本版 QEMU 是**顶层参数** `-tb-size n`：qemu-options.hx 里有
+       DEF("tb-size", HAS_ARG, QEMU_OPTION_tb_size, ...)、vl.c 的
+       QEMU_OPTION_tb_size 分支把它读进全局 tcg_tb_size、accel/tcg/tcg-all.c
+       的 tcg_init() 再 tcg_exec_init(tcg_tb_size * 1024 * 1024)。
+       **不是** `-accel tcg,tb-size=` 那种新写法 —— 早先按新写法加进去报
+       "Invalid parameter 'tb-size'"，于是误判成"本版不支持"，实际只是语法错。
+       默认只有 32MB：完整 Android 访客的翻译块很快把缓存挤爆，之后每遇到
+       新代码就要冲掉重翻，启动与切应用都会明显变慢。这里给到 512MB
+       （aarch64 上 MAX_CODE_GEN_BUFFER_SIZE 是 size_t 上限，不受限）。 */
+    add_arg("%s", "-tb-size");
+    add_arg("%d", 512);
     add_arg("%s", "-M");
     add_arg("%s", "ranchu");
     add_arg("%s", "-cpu");
-    add_arg("%s", "cortex-a57");
+    if (want_kvm) {
+        add_arg("%s", "host");
+    } else {
+        /* TCG 下给访客暴露哪套 CPU 特性。
+           `cortex-a57` 是 ARMv8.0 基线：没有 LSE 原子、没有 crc/crypto 指令，
+           访客（内核 5.4 / ART / 包扫描）只能用一堆普通指令模拟这些操作。
+           `max` 打开本版 QEMU 支持的全部特性，访客内核按 ID 寄存器自行选用，
+           重哈希（sha/crc）与锁竞争路径能少执行大量指令。
+           真机 A/B 不必重编 APK：`setprop debug.vmhost.cpu <型号>` 即可覆盖，
+           清空该属性（`setprop debug.vmhost.cpu ''`）回到默认值。 */
+        char cpu_model[64];
+        cpu_model[0] = '\0';
+        if (__system_property_get("debug.vmhost.cpu", cpu_model) <= 0 ||
+            cpu_model[0] == '\0') {
+            snprintf(cpu_model, sizeof(cpu_model), "%s", "cortex-a57");
+        }
+        add_arg("%s", cpu_model);
+    }
     add_arg("%s", "-smp");
     add_arg("%d", cores);
     add_arg("%s", "-m");
@@ -295,8 +704,69 @@ static int spawn_qemu_child(const VmQemuParams *p, const char *exe_path, const c
 
     add_arg("%s", "-device");
     add_arg("%s", "virtio-rng-device");
+
+    /* virtio-gpu 必须走 **PCI**（virtio-gpu-pci），不能走 virtio-mmio。
+       guest 的 virtio-gpu 驱动是 Android/gfxstream 魔改版（virtio_gpu(O)），
+       它在 `VIRTIO_GPU_F_RESOURCE_BLOB` 特性下会做 PCI 一致性内存初始化：
+           pdev = <vdev 的 PCI 父设备>;
+           ... 读 pdev->resource[4] ...
+           pci_request_region(pdev, 4, "virtio-gpu-coherent");
+       挂在 virtio-mmio 上时父设备不是 PCI 设备 → pdev == NULL →
+       virtio_gpu_init 在 `ldr x8,[x0,#0x5c8]` 上 NULL 解引用，guest 内核 panic。
+       Android 模拟器本来就是 virtio-gpu-pci + gfxstream，这里保持一致。 */
     add_arg("%s", "-device");
-    add_arg("%s", "virtio-gpu-device");
+    add_arg("%s", "virtio-gpu-pci");
+
+    /* 输入设备：virtio-input（virtio-tablet-device + virtio-keyboard-device）。
+       此前因 ranchu 的 virtio-mmio 传输是 legacy（VIRT_VERSION=1，无
+       force-legacy 开关），virtio-input 这类 spec 1.0 设备在 guest 端绑不上
+       驱动（"version 2 must provide VIRTIO_F_VERSION_1"），被迫改走 PCI xHCI
+       + USB HID。现已给 hw/virtio/virtio-mmio.c 加了 modern 传输支持：
+       force_legacy 默认 false、VERSION=2、pre_plugged 通告
+       VIRTIO_F_VERSION_1，且 DEVICE_FEATURES 正确暴露高 32 位（bit32 在其中）。
+       virtio-tablet 提供绝对坐标（Android 识别为触摸/指针），virtio-keyboard
+       提供按键。 */
+    add_arg("%s", "-device");
+    add_arg("%s", "virtio-tablet-device");
+    add_arg("%s", "-device");
+    add_arg("%s", "virtio-keyboard-device");
+
+    /* QMP socket：输入注入的**跨进程**通道。
+       B1 模式下 QEMU 在子进程、输入代码在父进程，而 ui_vmhost.c 的 s_con 只在
+       子进程的 graphic_console_init() 里被赋值，父进程恒为 NULL —— 父进程直接调
+       vmhost_input_touch() 只会撞上 `if (s_con == NULL) return;` 被静默丢弃。
+       改用 QMP 后，父进程把 input-send-event 发给子进程，事件在子进程内路由到
+       上面两个 virtio-input 设备。语法用 2.12 时代的 `server,nowait`
+       （`server=on,wait=off` 是 4.0+ 才有的写法）。 */
+    {
+        char qmp_path[ARG_CAP];
+        qmp_path[0] = '\0';
+        if (p->serial_log_path != NULL) {
+            snprintf(qmp_path, sizeof(qmp_path), "%s", p->serial_log_path);
+            char *slash = strrchr(qmp_path, '/');
+            if (slash != NULL) {
+                snprintf(slash + 1, sizeof(qmp_path) - (size_t) (slash + 1 - qmp_path),
+                         "qmp.sock");
+            } else {
+                qmp_path[0] = '\0';
+            }
+        }
+        if (qmp_path[0] != '\0') {
+            /* 先清掉上次运行残留的 socket 文件：QEMU 自己会 bind，但残留的
+               inode 会让"刚 spawn 就去连"的那条路径连到一个已经死掉的 socket
+               上（实测：connect 成功、write 立刻失败，load 被误判成失败）。 */
+            unlink(qmp_path);
+            add_arg("%s", "-qmp");
+            add_arg("unix:%s,server,nowait", qmp_path);
+        } else {
+            LOGW("拿不到日志目录，QMP 未开启（输入注入将不可用）");
+        }
+        /* 再开一个本机 TCP 的 QMP，只为排查：adb forward tcp:4444 tcp:4444 之后
+           可以直接用 QMP（info qtree / input-send-event）查 QEMU 内部的设备与输入
+           路由，不必改代码重装。 */
+        add_arg("%s", "-qmp");
+        add_arg("tcp:127.0.0.1:4444,server,nowait");
+    }
 
     /* 注意：B1 子进程模式**先不带网络**。
        这台 AOSP QEMU 上 `-netdev user,id=net0` 会解析失败并直接报错退出
@@ -305,6 +775,70 @@ static int spawn_qemu_child(const VmQemuParams *p, const char *exe_path, const c
        启动到 boot_completed）。网络接入放到后续单独做。 */
 
     add_arg("%s", "-no-reboot");
+
+    /* 快照的 VM state 需要一块"支持快照"的块设备：QEMU 的
+       bdrv_all_find_vmstate_bs() 只认 qcow2 这类驱动，而我们的盘全是 raw
+       （官方 emulator 是靠 drive-share 把镜像转成 qcow2 overlay 才满足这个前提）。
+       这里专门挂一个小的 qcow2 vmstate 盘：设备状态落在它里面，guest RAM 走
+       aemu 的 QEMUFileHooks 落到 ram.img。文件不存在时 QEMU 会自己创建。 */
+    if (p->userdata_img_path != NULL) {
+        char vmstate_path[ARG_CAP];
+        snprintf(vmstate_path, sizeof(vmstate_path), "%s", p->userdata_img_path);
+        char *slash = strrchr(vmstate_path, '/');
+        if (slash != NULL) {
+            snprintf(slash + 1,
+                     sizeof(vmstate_path) - (size_t) (slash + 1 - vmstate_path),
+                     "vmstate.qcow2");
+            /* **只在文件存在时才挂**：QEMU 不会自己创建 qcow2，文件缺失时它会
+               直接 "Could not open ...: No such file" 退出 —— 那会让整个 VM
+               起不来。缺了这块盘只是"快照不可用"，冷启动必须照常工作。 */
+            if (file_ok(vmstate_path)) {
+                add_arg("%s", "-drive");
+                add_arg("if=none,id=vmstate,file=%s,format=qcow2", vmstate_path);
+            } else {
+                LOGW("没有 %s：本次不挂 vmstate 盘（快照保存会失败，冷启动不受影响）",
+                     vmstate_path);
+            }
+        }
+    }
+
+    /* 快照恢复：若实例目录里存在 snapshot.bin，则用 -incoming 加载它，
+       把上次"已经跑起来的 VM"（含 guest RAM 与设备状态）直接恢复，
+       省掉整段冷启动。快照的保存走 QMP 的 migrate（见 vm_snapshot.c）。
+       注意：恢复时 QEMU 的命令行必须与保存时一致（同样的设备/内存/镜像），
+       这里的参数正是同一套拼装逻辑，所以天然一致。 */
+    {
+        char snap[ARG_CAP];
+        snap[0] = '\0';
+        if (p->userdata_img_path != NULL) {
+            snprintf(snap, sizeof(snap), "%s", p->userdata_img_path);
+            char *slash = strrchr(snap, '/');
+            if (slash != NULL) {
+                snprintf(slash + 1, sizeof(snap) - (size_t) (slash + 1 - snap),
+                         "snapshot.bin");
+            } else {
+                snap[0] = '\0';
+            }
+        }
+        if (snap[0] != '\0' && file_ok(snap)) {
+            /* 快照恢复：QEMU 自己监听 unix socket（它是 server），
+               App 作为 client 稍后连上去喂数据（见 snap_feed_thread）。 */
+            snprintf(s_snap_file, sizeof(s_snap_file), "%s", snap);
+            snprintf(s_snap_sock, sizeof(s_snap_sock), "%s", snap);
+            char *sl = strrchr(s_snap_sock, '/');
+            if (sl != NULL) {
+                snprintf(sl + 1, sizeof(s_snap_sock) - (size_t) (sl + 1 - s_snap_sock),
+                         "mig.sock");
+            }
+            snap_prepare(s_snap_sock);
+            add_arg("%s", "-incoming");
+            add_arg("unix:%s", s_snap_sock);
+            s_restoring = true;
+            LOGI("检测到快照，QEMU 以 -incoming unix:%s 恢复（快照 %s）",
+                 s_snap_sock, snap);
+        }
+    }
+
     add_arg("%s", "-display");
     add_arg("%s", "none");
     if (p->serial_log_path != NULL) {
@@ -344,11 +878,45 @@ static int spawn_qemu_child(const VmQemuParams *p, const char *exe_path, const c
         }
         /* AOSP QEMU 依赖同目录的 glib/pixman/... ，必须显式给库搜索路径 */
         setenv("LD_LIBRARY_PATH", lib_dir, 1);
+        /* 访客显示分辨率：gfxstream glue（vmhost_gfx_glue.cpp）从环境变量读，
+           未设置时用它自己的编译期默认 720x1280。运行期可调，便于对比不同
+           分辨率下的合成开销。 */
+        if (p->display_width > 0 && p->display_height > 0) {
+            char dim[32];
+            snprintf(dim, sizeof(dim), "%d", p->display_width);
+            setenv("VMHOST_GFX_W", dim, 1);
+            snprintf(dim, sizeof(dim), "%d", p->display_height);
+            setenv("VMHOST_GFX_H", dim, 1);
+        }
         /* 管道服务日志：打印访客的 pipe 请求有没有走到 aemu 的 AndroidPipe 服务
-           （含首包的 "pipe:<name>" 服务名）。已知可用基线（exp47 的 Oct 5 构建）
-           里访客会打开 7 次 `pipe:opengles`；这里用来对比 App 路径到底有没有打开，
-           以定位"访客 EGL 连不上宿主"是没发起还是没被服务。 */
-        setenv("VMHOSTPIPE_SVC", "1", 1);
+           （含首包的 "pipe:<name>" 服务名）。当年用它定位"访客 EGL 连不上宿主"，
+           但它是**每次 recv/send 打一行**：只要有一条 pipe 在轮询，日志就会疯长
+           —— 实测一条卡住的 pipe 刷出 570 万行 / 190MB（约 120KB/s，一天 10GB），
+           既吃存储又吃 IO。所以默认关闭，需要时
+           `setprop debug.vmhost.pipe_log 1` 再开。 */
+        {
+            char v[PROP_VALUE_MAX] = {0};
+            if (__system_property_get("debug.vmhost.pipe_log", v) > 0 &&
+                v[0] == '1') {
+                setenv("VMHOSTPIPE_SVC", "1", 1);
+            }
+        }
+        /* 逐包/逐次的宿主诊断同样默认关闭 —— 它们比 pipe 日志更凶：
+           VMHOST_GLES1_OP 是"每个 GLES 包一行"、VMHOST_GLES2_LOWFREQ 是所谓
+           "低频"调用（实测 2.5 分钟 21 万行），VMHOST_MUTEXDBG 每条 mutex 析构
+           一次还带符号解析（2.5 分钟 3 万行）。三个开关各对应一个属性。 */
+        {
+            char v[PROP_VALUE_MAX] = {0};
+            if (__system_property_get("debug.vmhost.gles_log", v) > 0 &&
+                v[0] == '1') {
+                setenv("VMHOST_GLES_LOG", "1", 1);
+            }
+            v[0] = '\0';
+            if (__system_property_get("debug.vmhost.mutex_log", v) > 0 &&
+                v[0] == '1') {
+                setenv("VMHOST_MUTEX_LOG", "1", 1);
+            }
+        }
         /* 崩溃诊断：aemu 的 Thread::maskAllSignals() 用 sigfillset 把 SIGSEGV 也屏蔽了，
            QEMU 自带的崩溃处理器因此永不触发，现场只剩"日志突然中断"。
            libsigfix.so 拦截 pthread_sigmask/sigprocmask，把崩溃信号从屏蔽集里剔掉。 */
@@ -370,12 +938,46 @@ static int spawn_qemu_child(const VmQemuParams *p, const char *exe_path, const c
                 setenv("VMHOST_FRAME_DIR", frame_dir, 1);
             }
         }
+        /* aemu 快照目录：模拟器那边是由
+              getSnapshotBaseDir() = avdInfo_getContentPath(avdInfo) + "/snapshots"
+           推出来的。我们不是 emulator 前端、没有 AVD，所以由 glue 里的
+           avdInfo_getContentPath shim 读这个环境变量，让快照落进实例目录。 */
+        if (p->userdata_img_path != NULL) {
+            char snap_dir[ARG_CAP];
+            snprintf(snap_dir, sizeof(snap_dir), "%s", p->userdata_img_path);
+            char *slash = strrchr(snap_dir, '/');
+            if (slash != NULL) {
+                *slash = '\0';
+                setenv("VMHOST_SNAP_DIR", snap_dir, 1);
+            }
+        }
         execve(exe_path, s_argv, environ);
         _exit(127);   /* 只有 exec 失败才会到这 */
     }
 
     s_child_pid = pid;
     LOGI("已拉起子进程 QEMU（ranchu 模式）pid=%d exe=%s", pid, exe_path);
+
+    /* 上次留下的快照：起线程等 QMP 就绪后发 load。
+       成功 → 直接恢复；失败 → 线程自己删标记并放行，本次按冷启动继续。 */
+    if (file_ok(s_snap_state_file)) {
+        pthread_t th;
+        if (pthread_create(&th, NULL, snap_load_thread, NULL) == 0) {
+            pthread_detach(th);
+        } else {
+            LOGW("快照恢复线程创建失败，本次按冷启动继续");
+        }
+    }
+
+    /* 父进程：若本次是快照恢复，起一个线程连上 QEMU 的迁移 socket 并喂快照 */
+    if (s_snap_sock[0] != '\0') {
+        pthread_t th;
+        if (pthread_create(&th, NULL, snap_feed_thread, NULL) == 0) {
+            pthread_detach(th);
+        } else {
+            LOGE("快照中转线程创建失败");
+        }
+    }
     return 0;
 }
 
@@ -576,6 +1178,9 @@ bool vm_qemu_stop(int timeout_ms)
     /* 子进程模式：AOSP QEMU 没有 vmhost 停机通道，按信号停。
        SIGTERM 先给一次机会，超时再 SIGKILL 兜底。 */
     if (child > 0) {
+        /* 停机前抓一份快照（供下次秒开）。必须先冻住 guest，
+           所以 save 走的是「QMP stop → vmhostsnapshot save」。 */
+        snap_try_save();
         LOGI("请求子进程 QEMU 停机（pid=%d，最多等 %d ms）", child, timeout_ms);
         kill(child, SIGTERM);
         const int step_ms = 20;
@@ -590,6 +1195,14 @@ bool vm_qemu_stop(int timeout_ms)
             LOGI("子进程 QEMU 已退出");
         }
         s_child_pid = -1;
+        /* 必须清掉启动标记。否则同一进程内「退出实例 → 再次进入」的第二次启动
+           会命中 vm_qemu_start 里的 s_started 检查，被当成"已经启动过，忽略"，
+           结果 QEMU 永远起不来（表现是黑屏、logs 里只有 frame.request 没有
+           console.log）。真机实测：on_window_gone 停机后再 onStart 就会踩到。 */
+        pthread_mutex_lock(&s_lock);
+        s_started = false;
+        s_running = false;
+        pthread_mutex_unlock(&s_lock);
         return true;
     }
 
@@ -622,6 +1235,10 @@ bool vm_qemu_stop(int timeout_ms)
         pthread_join(s_thread, NULL);
     }
     LOGI("QEMU 已退出");
+    pthread_mutex_lock(&s_lock);
+    s_started = false;
+    s_running = false;
+    pthread_mutex_unlock(&s_lock);
     return true;
 }
 
@@ -634,14 +1251,88 @@ bool vm_qemu_is_child_process(void)
     return child;
 }
 
+bool vm_qemu_qmp_path(char *out, size_t out_len)
+{
+    if (out == NULL || out_len == 0) {
+        return false;
+    }
+
+    pthread_mutex_lock(&s_lock);
+    bool ok = (s_serial_log[0] != '\0');
+    if (ok) {
+        /* 与 spawn_qemu_child() 里拼 -qmp unix:<...>/qmp.sock 保持同一套推导 */
+        char path[ARG_CAP];
+        snprintf(path, sizeof(path), "%s", s_serial_log);
+        char *slash = strrchr(path, '/');
+        if (slash != NULL) {
+            snprintf(slash + 1, sizeof(path) - (size_t) (slash + 1 - path), "qmp.sock");
+            snprintf(out, out_len, "%s", path);
+        } else {
+            ok = false;
+        }
+    }
+    pthread_mutex_unlock(&s_lock);
+    return ok;
+}
+
 bool vm_qemu_is_running(void)
 {
-    /* 子进程模式直接看子进程存活 */
+    pthread_mutex_lock(&s_lock);
+    const bool child_mode = s_child_mode;
+    const bool running = s_running;
+    pthread_mutex_unlock(&s_lock);
+
+    /* 子进程模式**必须以子进程存活为准**。
+       曾经这里回落到 s_running —— 那个标志只在 stop/reset 里清，子进程崩了它
+       还是 true，于是"QEMU 已停止运行"那条分支永远不会走，僵尸也收不掉，
+       快照恢复失败也就没人回退（实测踩到）。child_alive() 会在回收子进程后
+       返回 false，正是我们要的判据。 */
+    if (child_mode) {
+        return child_alive();
+    }
+    return running;
+}
+
+bool vm_qemu_has_started(void)
+{
+    pthread_mutex_lock(&s_lock);
+    const bool started = s_started;
+    pthread_mutex_unlock(&s_lock);
+    return started;
+}
+
+/**
+ * 本次启动是不是「快照恢复」、并且已经确定失败了。
+ *
+ * 判据很直接：走的是 -incoming 恢复，而子进程已经不在了。真机实测：
+ * 拿一份完整的迁移流喂回去，QEMU 在 RAM 段就报
+ * `Unknown ramblock "", cannot accept migration` 然后 exit(1) ——
+ * 这条流不是它认的格式（ranchu/gfxstream 侧还有 aemu 的快照钩子）。
+ * 调用方拿到 true 就该把快照删掉、按冷启动重来，否则实例永远黑屏。
+ */
+bool vm_qemu_restore_failed(void)
+{
     if (s_child_pid > 0 && child_alive()) {
-        return true;
+        return false;   /* 还活着，谈不上失败 */
     }
     pthread_mutex_lock(&s_lock);
-    bool running = s_running;
+    const bool failed = s_restoring;
     pthread_mutex_unlock(&s_lock);
-    return running;
+    return failed;
+}
+
+/** 子进程退出后复位启动状态，让上层能再走一次 vm_qemu_start（冷启动）。 */
+void vm_qemu_reset(void)
+{
+    pthread_mutex_lock(&s_lock);
+    s_started = false;
+    s_running = false;
+    s_finished = false;
+    s_joined = false;
+    s_child_mode = false;
+    s_child_pid = -1;
+    s_restoring = false;
+    s_snap_sock[0] = '\0';
+    s_snap_file[0] = '\0';
+    pthread_mutex_unlock(&s_lock);
 }

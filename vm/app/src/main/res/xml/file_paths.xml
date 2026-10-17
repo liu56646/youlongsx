@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  自更新用：只暴露 cacheDir/update/ 给系统安装器读 APK。
+  不要放开整个 cacheDir 或外部存储，避免把内部文件暴露出去。
+-->
+<paths>
+    <cache-path
+        name="update"
+        path="update/" />
+</paths>

@@ -2,6 +2,7 @@
 #define VM_QEMU_H
 
 #include <stdbool.h>
+#include <stddef.h>
 
 /**
  * QEMU 启动参数。
@@ -28,7 +29,21 @@ typedef struct {
     const char *serial_log_path;  /**< 访客串口日志落盘路径，可为 NULL */
     int         memory_mb;        /**< 内存，<=0 时取 2048 */
     int         cores;            /**< vCPU 数，<=0 时取 4 */
+    /**
+     * 访客显示分辨率（<=0 时用 gfxstream 的编译期默认 720x1280）。
+     *
+     * TCG 下每帧每个像素都要 guest 的 SF/HWC 合成，像素量直接决定合成耗时，
+     * 因而是"调快慢"最直接的旋钮。做成运行期参数是为了能 A/B 对比不同分辨率
+     * 而不必每次重编 QEMU。
+     */
+    int         display_width;
+    int         display_height;
     bool        enable_network;   /**< 是否挂 virtio-net + QEMU 用户态 NAT（slirp） */
+    /**
+     * 请求的后端名（VmBackend.name，如 "KVM" / "QEMU_TCG"）。NULL 或空串视为 TCG。
+     * 引擎会再核对一次 /dev/kvm 是否真能打开，打不开自动回退 TCG。
+     */
+    const char *backend_name;
 } VmQemuParams;
 
 /**
@@ -59,5 +74,26 @@ bool vm_qemu_is_running(void);
  * （vm_frame_relay.h）。引擎据此决定要不要打开回传。
  */
 bool vm_qemu_is_child_process(void);
+
+/**
+ * 取 QEMU 的 QMP unix socket 路径（即 <日志目录>/qmp.sock）。
+ *
+ * B1 子进程模式下父进程靠它把输入事件（input-send-event）发给子进程里的
+ * QEMU —— 见 vm_qmp.h。路径由 vm_qemu_start() 配置 -qmp 时确定，未启动或
+ * 拿不到日志目录时返回 false。
+ */
+bool vm_qemu_qmp_path(char *out, size_t out_len);
+
+/**
+ * 本次启动是否走「快照恢复」并且已经失败（子进程早早退出）。
+ * 调用方据此删除快照、回退冷启动，否则实例会一直黑屏。
+ */
+bool vm_qemu_restore_failed(void);
+
+/** 复位启动状态，使上层可以在子进程退出后再调一次 vm_qemu_start()。 */
+void vm_qemu_reset(void);
+
+/** 本次会话是否已经拉起过 QEMU（用于判断「该盯存活了」）。 */
+bool vm_qemu_has_started(void);
 
 #endif /* VM_QEMU_H */

@@ -3,20 +3,23 @@
  *
  * 协议见 vm_frame_relay.h。这里只做三件事：
  *   1. 读 <dir>/frame.seq，与上次比较，判断 QEMU 是否回传了新帧；
- *   2. 有新帧就读 <dir>/frame.ppm（P6）并转成 RGBA8888；
+ *   2. 有新帧就读 <dir>/frame.rgba —— 内容已是原生 RGBA8888，读进来直接交给 GL；
  *   3. 没有新帧时按节流补写 <dir>/frame.request。
  *
  * 线程模型：只在渲染线程调用（vm_guest_display_poll），因此不需要加锁。
  */
 
 #include "vm_frame_relay.h"
+#include "vm_frame_shm.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <android/log.h>
 
@@ -25,10 +28,14 @@
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
 
 /*
- * QEMU 侧截图线程是 200ms 一轮（vmhost_gfx_screen_thread）。
- * 请求间隔比它略大，既不会堆积请求，也不会白白空转。
+ * 请求节流间隔 —— 也就是显示回传的目标帧率上限（16ms ≈ 60Hz）。
+ *
+ * 以前是 250ms（≈4 FPS），这是"卡"最主要的来源之一：触摸和滚动的跟手感
+ * 几乎全被它吃掉，跟 TCG 快慢无关。
+ * 现在 QEMU 侧回传线程是 8ms 一轮，且**只有访客真的 post 了新帧**才写盘 + 推进
+ * frame.seq，所以高频请求不会产生额外 IO —— 只是让新画面尽快被取走。
  */
-#define REQUEST_INTERVAL_MS 250
+#define REQUEST_INTERVAL_MS 16
 
 /*
  * 同一个 frame.seq 连续解码失败多少次后就放弃这一帧。
@@ -58,21 +65,23 @@ static uint64_t s_last_seq;
 static bool     s_request_pending;
 static uint64_t s_request_sent_ms;   /* 在途请求的发出时刻（判超时用） */
 static uint64_t s_next_request_ms;
-static bool     s_warned_short_ppm;
 
-/* 解码失败重试用（见 DECODE_RETRY_MAX 的说明） */
+/* 解码（读文件）失败重试用（见 DECODE_RETRY_MAX 的说明） */
 static uint64_t s_failed_seq;
 static unsigned s_failed_count;
 
-/* 最近一帧的输出缓冲（RGBA8888） */
-static uint8_t *s_pixels;
-static size_t   s_cap;
-static int      s_width;
-static int      s_height;
+/*
+ * 帧文件读入缓冲（复用，避免每帧 malloc/free 几 MB）。
+ * v2 起文件内容就是原生 RGBA8888，所以这块缓冲**直接**交给 GL 上传：
+ * 不再需要单独的输出缓冲，也不再有任何逐像素色彩转换。
+ */
+static uint8_t *s_buf;
+static size_t   s_buf_cap;
 
-/* 读进来的 PPM 原文（复用，避免每帧 malloc/free 两三 MB） */
-static uint8_t *s_ppm_buf;
-static size_t   s_ppm_cap;
+/* 当前帧在 s_buf 里的像素起点与尺寸（load_raw 填，poll 返回给调用方） */
+static const uint8_t *s_frame_pixels;
+static int s_frame_w;
+static int s_frame_h;
 
 /* ------------------------------------------------------------------ */
 /* 小工具                                                              */
@@ -131,152 +140,80 @@ static bool read_seq(uint64_t *out)
 }
 
 /* ------------------------------------------------------------------ */
-/* PPM (P6) 解码                                                       */
+/* v2 帧文件读取（原生 RGBA8888，无色彩转换）                          */
 /* ------------------------------------------------------------------ */
 
-/** 跳过空白与 '#' 注释，读一个十进制整数。 */
-static bool ppm_next_int(const char **pp, const char *end, long *out)
-{
-    const char *p = *pp;
-
-    for (;;) {
-        while (p < end && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) {
-            p++;
-        }
-        if (p < end && *p == '#') {
-            while (p < end && *p != '\n') {
-                p++;
-            }
-            continue;
-        }
-        break;
-    }
-    if (p >= end) {
-        return false;
-    }
-
-    long v = 0;
-    bool any = false;
-    while (p < end && *p >= '0' && *p <= '9') {
-        v = v * 10 + (*p - '0');
-        p++;
-        any = true;
-    }
-    if (!any) {
-        return false;
-    }
-
-    *pp = p;
-    *out = v;
-    return true;
-}
-
-/**
- * 把 P6 PPM 解成 RGBA8888 存进 s_pixels，并更新 s_width/s_height。
- * 成功返回 true。
+/*
+ * 文件格式（与 QEMU 侧 vmhost_gfx_glue.cpp 的 vmhost_gfx_write_raw_file 一致）：
+ *   [0..3] u32 width（小端）  [4..7] u32 height（小端）  [8..] RGBA8888
+ *
+ * "解码"因此退化成一次读文件：读进来的缓冲里，头部之后就是可以**直接**
+ * 交给 glTexSubImage2D 的像素 —— 不再有 P6 解析，也不再有逐像素 RGB->RGBA，
+ * 更没有为输出另拷的一份全帧缓冲。
  */
-static bool ppm_decode_to_rgba(const uint8_t *data, size_t len)
-{
-    const char *p = (const char *) data;
-    const char *end = p + len;
+#define RAW_HDR 8u
+/* 尺寸护栏：真机在 1080p 上下，防坏文件把内存吃爆。 */
+#define RAW_MAX_DIM 8192
 
-    if (len < 8 || p[0] != 'P' || p[1] != '6') {
-        return false;
-    }
-    p += 2;
-
-    long w = 0;
-    long h = 0;
-    long maxval = 0;
-    if (!ppm_next_int(&p, end, &w) || !ppm_next_int(&p, end, &h) ||
-        !ppm_next_int(&p, end, &maxval)) {
-        return false;
-    }
-    if (w <= 0 || h <= 0 || maxval != 255) {
-        return false;
-    }
-    /* 头之后恰好一个空白分隔符，随后就是像素数据 */
-    if (p >= end) {
-        return false;
-    }
-    p++;
-
-    const size_t need = (size_t) w * (size_t) h * 3u;
-    if ((size_t) (end - p) < need) {
-        if (!s_warned_short_ppm) {
-            s_warned_short_ppm = true;
-            LOGW("frame.ppm 数据不足（需要 %zu 字节，只有 %zu）",
-                 need, (size_t) (end - p));
-        }
-        return false;
-    }
-
-    const size_t px = (size_t) w * (size_t) h;
-    const size_t out_bytes = px * 4u;
-    if (s_cap < out_bytes) {
-        uint8_t *fresh = (uint8_t *) realloc(s_pixels, out_bytes);
-        if (fresh == NULL) {
-            LOGW("回传缓冲分配失败（需要 %zu 字节）", out_bytes);
-            return false;
-        }
-        s_pixels = fresh;
-        s_cap = out_bytes;
-    }
-
-    const uint8_t *s = (const uint8_t *) p;
-    uint8_t *d = s_pixels;
-    for (size_t i = 0; i < px; i++) {
-        d[0] = s[0];
-        d[1] = s[1];
-        d[2] = s[2];
-        d[3] = 0xFF;
-        d += 4;
-        s += 3;
-    }
-
-    s_width = (int) w;
-    s_height = (int) h;
-    return true;
-}
-
-/** 读 <dir>/frame.ppm 并解码。成功返回 true。 */
-static bool load_ppm(void)
+/** 读 <dir>/frame.rgba 并定位像素。成功返回 true。 */
+static bool load_raw(void)
 {
     char path[DIR_CAP + 32];
 
-    if (!build_path(path, sizeof(path), "frame.ppm")) {
+    if (!build_path(path, sizeof(path), "frame.rgba")) {
         return false;
     }
 
-    FILE *fp = fopen(path, "rb");
-    if (fp == NULL) {
+    const int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
         return false;
     }
-    if (fseek(fp, 0, SEEK_END) != 0) {
-        fclose(fp);
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size <= (off_t) RAW_HDR) {
+        close(fd);
         return false;
     }
-    const long size = ftell(fp);
-    if (size <= 0) {
-        fclose(fp);
-        return false;
-    }
-    rewind(fp);
 
-    const size_t need = (size_t) size;
-    if (s_ppm_cap < need) {
-        uint8_t *fresh = (uint8_t *) realloc(s_ppm_buf, need);
+    const size_t need = (size_t) st.st_size;
+    if (s_buf_cap < need) {
+        uint8_t *fresh = (uint8_t *) realloc(s_buf, need);
         if (fresh == NULL) {
-            fclose(fp);
+            LOGW("回传缓冲分配失败（需要 %zu 字节）", need);
+            close(fd);
             return false;
         }
-        s_ppm_buf = fresh;
-        s_ppm_cap = need;
+        s_buf = fresh;
+        s_buf_cap = need;
     }
-    const size_t got = fread(s_ppm_buf, 1, need, fp);
-    fclose(fp);
 
-    return got == need && ppm_decode_to_rgba(s_ppm_buf, got);
+    size_t got = 0;
+    while (got < need) {
+        const ssize_t n = read(fd, s_buf + got, need - got);
+        if (n <= 0) {
+            break;
+        }
+        got += (size_t) n;
+    }
+    close(fd);
+    if (got != need) {
+        return false;
+    }
+
+    uint32_t w = 0;
+    uint32_t h = 0;
+    memcpy(&w, s_buf + 0, 4);
+    memcpy(&h, s_buf + 4, 4);
+    if (w == 0 || h == 0 || w > RAW_MAX_DIM || h > RAW_MAX_DIM) {
+        return false;
+    }
+    if (need - RAW_HDR < (size_t) w * (size_t) h * 4u) {
+        return false;
+    }
+
+    s_frame_pixels = s_buf + RAW_HDR;
+    s_frame_w = (int) w;
+    s_frame_h = (int) h;
+    return true;
 }
 
 /* ------------------------------------------------------------------ */
@@ -331,6 +268,132 @@ static void maybe_request(int req_w, int req_h)
 }
 
 /* ------------------------------------------------------------------ */
+/* v3 共享内存帧回传（首选路径，替代 frame.rgba 文件握手）              */
+/* ------------------------------------------------------------------ */
+/*
+ * 写端（QEMU 子进程的 vmhost_gfx_glue.cpp）把最新帧写进 <dir>/frame.shm 的
+ * 轮转缓冲并 release 递增头里的 seq；这里 mmap 同一文件，按 seq 变化取帧。
+ * 相比读文件：省掉每帧的 open/read 两条系统调用与文件页缓存开销。
+ *
+ * 拿不到 frame.shm（旧版写端 / 还没建好）时自动回退原来的 file 协议。
+ */
+
+static int                s_shm_fd = -1;
+static VmFrameShmHeader*  s_shm = NULL;
+static size_t             s_shm_len = 0;
+static uint64_t           s_shm_last_seq = 0;
+static uint64_t           s_shm_last_try_ms = 0;
+
+static void shm_close(void)
+{
+    if (s_shm != NULL) {
+        munmap(s_shm, s_shm_len);
+        s_shm = NULL;
+    }
+    if (s_shm_fd >= 0) {
+        close(s_shm_fd);
+        s_shm_fd = -1;
+    }
+    s_shm_len = 0;
+    s_shm_last_seq = 0;
+}
+
+/** 尽力打开并映射 <dir>/frame.shm；成功返回 true（之后缓存）。 */
+static bool shm_try_open(void)
+{
+    if (s_shm != NULL) {
+        return true;
+    }
+    if (s_dir[0] == '\0') {
+        return false;
+    }
+
+    char path[DIR_CAP + 32];
+    if (!build_path(path, sizeof(path), "frame.shm")) {
+        return false;
+    }
+    const int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        return false;
+    }
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size < (off_t)VM_FRAME_SHM_HDR_SIZE) {
+        close(fd);
+        return false;
+    }
+    void* m = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+    if (m == MAP_FAILED) {
+        close(fd);
+        return false;
+    }
+    VmFrameShmHeader* h = (VmFrameShmHeader*)m;
+    /* magic 由写端最后写入：不匹配说明还没初始化好，下次再试。 */
+    if (h->magic != VM_FRAME_SHM_MAGIC ||
+        h->version != VM_FRAME_SHM_VERSION ||
+        h->nbufs == 0 || h->stride_cap == 0 ||
+        (size_t)st.st_size <
+            (size_t)VM_FRAME_SHM_HDR_SIZE + (size_t)h->nbufs * (size_t)h->stride_cap) {
+        munmap(m, (size_t)st.st_size);
+        close(fd);
+        return false;
+    }
+
+    s_shm_fd = fd;
+    s_shm = h;
+    s_shm_len = (size_t)st.st_size;
+    s_shm_last_seq = h->seq;
+    LOGI("共享内存帧回传就绪：%s（disp %ux%u stride=%u n=%u）",
+         path, h->disp_w, h->disp_h, h->stride_cap, h->nbufs);
+    return true;
+}
+
+/** 从共享内存取一帧；有新帧返回 true。 */
+static bool shm_poll(int req_w, int req_h,
+                     const uint8_t **rgba, int *w, int *h, uint64_t *seq)
+{
+    const uint32_t s = __atomic_load_n(&s_shm->seq, __ATOMIC_ACQUIRE);
+    if (s == 0 || (uint64_t)s == s_shm_last_seq) {
+        /* 共享内存路径不需要请求文件：写端只要访客出新帧就会发布。
+           这里直接返回"还没有新帧"即可（省掉每 16ms 一次的文件写入）。 */
+        return false;
+    }
+
+    const uint32_t slot = s_shm->slot;
+    const uint32_t fw = s_shm->width;
+    const uint32_t fh = s_shm->height;
+    if (slot >= s_shm->nbufs || fw == 0 || fh == 0 ||
+        fw > RAW_MAX_DIM || fh > RAW_MAX_DIM) {
+        return false;
+    }
+    const size_t need = (size_t)fw * (size_t)fh * 4u;
+    if (need > s_shm->stride_cap) {
+        return false;
+    }
+
+    /*
+     * 零拷贝：直接把共享内存里这一槽的指针交出去，不再 memcpy 进 s_buf。
+     *
+     * 安全性：写端写的是 (seq+1)%NBUFS 槽，读端读的是 seq%NBUFS 槽；3 缓冲轮转下
+     * 写端要再过 NBUFS-1 帧才会复用读端这一槽，而调用方（vm_guest_display_poll）
+     * 在本次调用内就把它交给 glTexSubImage2D 上传，窗口远小于 1 帧，因此安全。
+     * 返回值在下一次 seq 前进 NBUFS 次之前保持有效。
+     */
+    const uint8_t* px = (const uint8_t*)s_shm + VM_FRAME_SHM_HDR_SIZE +
+                        (size_t)slot * (size_t)s_shm->stride_cap;
+
+    s_shm_last_seq = s;
+    s_frame_pixels = px;
+    s_frame_w = (int)fw;
+    s_frame_h = (int)fh;
+    s_request_pending = false;
+    if (rgba) { *rgba = s_frame_pixels; }
+    if (w)    { *w = s_frame_w; }
+    if (h)    { *h = s_frame_h; }
+    if (seq)  { *seq = s; }
+    return true;
+}
+
+/* ------------------------------------------------------------------ */
 /* 对外接口                                                            */
 /* ------------------------------------------------------------------ */
 
@@ -338,6 +401,7 @@ void vm_frame_relay_set_dir(const char *dir)
 {
     if (dir == NULL || dir[0] == '\0') {
         s_dir[0] = '\0';
+        shm_close();
         return;
     }
 
@@ -349,12 +413,14 @@ void vm_frame_relay_set_dir(const char *dir)
         LOGW("创建回传目录 %s 失败：%s", s_dir, strerror(errno));
     }
 
+    shm_close();              /* 换目录：旧的映射作废 */
+    s_shm_last_try_ms = 0;
     s_last_seq = 0;
     s_request_pending = false;
     s_next_request_ms = 0;
-    s_width = 0;
-    s_height = 0;
-    s_warned_short_ppm = false;
+    s_frame_pixels = NULL;
+    s_frame_w = 0;
+    s_frame_h = 0;
     s_failed_seq = 0;
     s_failed_count = 0;
 
@@ -378,26 +444,41 @@ bool vm_frame_relay_poll(int req_w, int req_h,
         return false;
     }
 
+    /* 首选：共享内存回传（v3）。若 frame.shm 尚未建好，按 500ms 节流重试，
+       期间回退下面的文件协议，保证旧写端/启动竞态下仍能出画面。 */
+    if (s_shm != NULL) {
+        return shm_poll(req_w, req_h, rgba, w, h, seq);
+    }
+    {
+        const uint64_t now = now_ms();
+        if (now - s_shm_last_try_ms >= 500) {
+            s_shm_last_try_ms = now;
+            if (shm_try_open()) {
+                return shm_poll(req_w, req_h, rgba, w, h, seq);
+            }
+        }
+    }
+
     /* 1. 先看有没有新帧 */
     uint64_t seq_now = 0;
     if (read_seq(&seq_now) && seq_now != s_last_seq) {
-        if (load_ppm()) {
+        if (load_raw()) {
             s_failed_seq = 0;
             s_failed_count = 0;
             s_last_seq = seq_now;
             s_request_pending = false;
-            if (rgba) { *rgba = s_pixels; }
-            if (w)    { *w = s_width; }
-            if (h)    { *h = s_height; }
+            if (rgba) { *rgba = s_frame_pixels; }
+            if (w)    { *w = s_frame_w; }
+            if (h)    { *h = s_frame_h; }
             if (seq)  { *seq = seq_now; }
             return true;
         }
 
         /*
-         * 解码失败。两种情况：
+         * 读取失败。两种情况：
          *   a) 恰好撞上 QEMU 侧 rename 的瞬间（理论上原子替换不会出现，
          *      但非原子写入的旧版 glue 会）—— 下一轮就好；
-         *   b) frame.ppm 真的坏了 —— seq 不会再变，一直重试就会永久卡死。
+         *   b) frame.rgba 真的坏了 —— seq 不会再变，一直重试就会永久卡死。
          * 所以同一个 seq 连续失败 DECODE_RETRY_MAX 次后跳过它，
          * 继续往下走重新要一帧（此时**不要**更新 s_last_seq 太早，
          * 否则会白白丢掉一个只是暂时读不到的帧）。
@@ -412,7 +493,7 @@ bool vm_frame_relay_poll(int req_w, int req_h,
             return false;
         }
 
-        LOGW("frame.ppm 连续 %u 次解码失败（seq=%llu），跳过该帧并重新请求",
+        LOGW("frame.rgba 连续 %u 次读取失败（seq=%llu），跳过该帧并重新请求",
              s_failed_count, (unsigned long long) seq_now);
         s_last_seq = seq_now;
         s_failed_seq = 0;

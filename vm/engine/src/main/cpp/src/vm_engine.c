@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <android/log.h>
 #include <android/native_window.h>
 #include <android/native_window_jni.h>
@@ -108,6 +109,40 @@ static bool json_get_string(const char *json, const char *key, char *out, size_t
 }
 
 #ifdef VM_WITH_QEMU
+/** 快照恢复失败时是否已经回退过一次（避免无限循环）。 */
+static bool s_restore_retried = false;
+
+static void vm_engine_boot_qemu(void);
+
+/**
+ * 子进程 QEMU 退出后的收尾。
+ *
+ * 只有一种情况需要我们补救：这次是按快照恢复起来的，而 QEMU 没接受那份
+ * 迁移流就直接退出了（真机实测报 `Unknown ramblock "", cannot accept
+ * migration`）。此时快照是坏的：留着它，实例每次进来都是黑屏。所以删档 +
+ * 复位引擎状态 + 按冷启动重来一次。
+ */
+void vm_engine_on_qemu_exit(void)
+{
+    if (!vm_qemu_restore_failed()) {
+        return;
+    }
+
+    LOGE("快照恢复失败：QEMU 没接受迁移流，删除快照后回退冷启动");
+    char stale[PATH_CAP];
+    snprintf(stale, sizeof(stale), "%s/snapshot.bin", s_data_dir);
+    unlink(stale);
+
+    if (s_restore_retried) {
+        LOGE("已回退过一次，本次不再重试（下次进入实例会走冷启动）");
+        vm_qemu_reset();
+        return;
+    }
+    s_restore_retried = true;
+    vm_qemu_reset();
+    vm_engine_boot_qemu();
+}
+
 /** 确保 <dataDir>/logs 存在（已存在则忽略）。 */
 static void ensure_log_dir(const char *data_dir)
 {
@@ -176,12 +211,30 @@ static void vm_engine_boot_qemu(void)
 
     snprintf(s_path_kernel, sizeof(s_path_kernel), "%s/kernel", s_image_dir);
     snprintf(s_path_initrd, sizeof(s_path_initrd), "%s/ramdisk.img", s_image_dir);
-    snprintf(s_path_system, sizeof(s_path_system), "%s/system.img", s_image_dir);
+    /* system.img 同样支持实例级覆盖：设备身份要同时落在 system 分区（fingerprint 的
+       版本段来自这里），详见 docs/方案B排障交接.md。实例目录里有就用它，否则回落 base。 */
+    snprintf(s_path_system, sizeof(s_path_system), "%s/system.img", s_data_dir);
+    {
+        struct stat sst;
+        if (stat(s_path_system, &sst) != 0 || !S_ISREG(sst.st_mode)) {
+            snprintf(s_path_system, sizeof(s_path_system), "%s/system.img", s_image_dir);
+        }
+    }
     snprintf(s_path_vendor, sizeof(s_path_vendor), "%s/vendor.img", s_image_dir);
     /* 访客 fstab 要求这四块只读盘 + 两块可写盘都在场，缺一块 first-stage init 就会
        "Failed to mount required partitions early"。product/system_ext 与 system/vendor
-       同源（只读，随镜像分发）；metadata 必须是可写的，放实例数据目录里。 */
-    snprintf(s_path_product, sizeof(s_path_product), "%s/product.img", s_image_dir);
+       同源（只读，随镜像分发）；metadata 必须是可写的，放实例数据目录里。
+
+       product 是个例外：它带 /build.prop 里的设备身份，支持「实例级覆盖」——
+       App 侧若为该实例选了机型，会在实例数据目录放一份改写过的 product.img，
+       这里优先用它；没有（或不是常规文件）则回落共享 base 镜像那份。 */
+    snprintf(s_path_product, sizeof(s_path_product), "%s/product.img", s_data_dir);
+    {
+        struct stat pst;
+        if (stat(s_path_product, &pst) != 0 || !S_ISREG(pst.st_mode)) {
+            snprintf(s_path_product, sizeof(s_path_product), "%s/product.img", s_image_dir);
+        }
+    }
     snprintf(s_path_system_ext, sizeof(s_path_system_ext), "%s/system_ext.img", s_image_dir);
     snprintf(s_path_metadata, sizeof(s_path_metadata), "%s/metadata.img", s_data_dir);
     snprintf(s_path_userdata, sizeof(s_path_userdata), "%s/userdata.img", s_data_dir);
@@ -200,6 +253,13 @@ static void vm_engine_boot_qemu(void)
     /* 内存 / vCPU 数从 VmConfig 取（缺省或非法时回落 2048 MB / 4 核） */
     const int memory_mb = json_get_int(s_config_json, "memoryMb", 2048);
     const int cores = json_get_int(s_config_json, "cores", 4);
+    /* 访客显示分辨率（可选）。TCG 下像素量直接决定合成耗时，运行期可调。 */
+    const int disp_w = json_get_int(s_config_json, "width", 720);
+    const int disp_h = json_get_int(s_config_json, "height", 1280);
+
+    /* 后端名（VmBackend.name，缺省 TCG）。KVM 时 vm_qemu 用 -accel kvm。 */
+    char backend[32] = "QEMU_TCG";
+    json_get_string(s_config_json, "backend", backend, sizeof(backend));
 
     VmQemuParams params = {
             .kernel_path = s_path_kernel,
@@ -213,7 +273,10 @@ static void vm_engine_boot_qemu(void)
             .serial_log_path = s_path_console,
             .memory_mb = memory_mb,
             .cores = cores,
+            .display_width = disp_w,
+            .display_height = disp_h,
             .enable_network = want_network,
+            .backend_name = backend,
     };
 
     LOGI("boot: kernel=%s", s_path_kernel);
@@ -431,6 +494,7 @@ void vm_engine_on_window_ready(struct android_app* app) {
 #ifdef VM_WITH_QEMU
     /* Surface 就绪 = 实例开始运行，此时拉起 QEMU。
        当前 QEMU 以 -display none 运行，画面稍后由渲染后端接管。 */
+    s_restore_retried = false;   /* 每次新窗口就绪都允许一次「坏快照回退」 */
     vm_engine_boot_qemu();
 #endif
 }
