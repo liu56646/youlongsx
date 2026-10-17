@@ -1161,6 +1161,52 @@ PY
 
 patch_ram_load_skip_unknown
 
+# virtio-tablet 缺少 INPUT_PROP_DIRECT → Android 把它当鼠标（只画光标、拖动不滚动）。
+# 补上 PROP_BITS=INPUT_PROP_DIRECT 后 InputReader 按"直连触摸屏"处理，
+# BTN_TOUCH + ABS_X/Y 就是一根手指，tap/滑动都正常。
+patch_virtio_tablet_direct() {
+    local f="$SRC_DIR/hw/input/virtio-input-hid.c"
+    [ -f "$f" ] || { echo "找不到 $f" >&2; return 1; }
+    if grep -q "VMHOST_TABLET_DIRECT" "$f"; then
+        echo "==> virtio-tablet DIRECT 补丁已存在，跳过"
+        return 0
+    fi
+    echo "==> 打补丁（virtio-tablet 标记为直连触摸屏）"
+    python3 - "$f" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+src = path.read_text(encoding="utf-8")
+anchor = """    },{
+        .select    = VIRTIO_INPUT_CFG_ABS_INFO,
+        .subsel    = ABS_Y,
+        .size      = sizeof(virtio_input_absinfo),
+        .u.abs.min = const_le32(INPUT_EVENT_ABS_MIN),
+        .u.abs.max = const_le32(INPUT_EVENT_ABS_MAX),
+    },
+"""
+add = """    {
+        /* VMHOST_TABLET_DIRECT：没有这一项时 Android 把 virtio-tablet 当鼠标，
+           只画一个光标，滑动手势不会滚动列表。标成 DIRECT 后按触摸屏处理。 */
+        .select    = VIRTIO_INPUT_CFG_PROP_BITS,
+        .size      = 1,
+        .u.bitmap  = {
+            (1 << INPUT_PROP_DIRECT),
+        },
+    },
+"""
+count = src.count(anchor)
+if count < 1:
+    raise SystemExit("virtio-tablet ABS_Y 锚点未找到")
+src = src.replace(anchor, anchor + add)
+path.write_text(src, encoding="utf-8")
+print("    已修改: hw/input/virtio-input-hid.c（%d 处）" % count)
+PY
+}
+
+patch_virtio_tablet_direct
+
 # 诊断插桩：goldfish_pipe 恢复时到底读到什么、哪一步映射失败
 # （跨进程快照恢复时 pipe 的 signalled buffer / open command 要重新映射回宿主
 #  地址空间，失败就 -EIO 终止整次恢复。先量清楚再改语义。）
