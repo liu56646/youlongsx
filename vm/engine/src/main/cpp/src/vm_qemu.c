@@ -862,10 +862,11 @@ static int spawn_qemu_child(const VmQemuParams *p, const char *exe_path, const c
         setenv("VMHOST_GOLDFISH_FB", "1", 1);
         setenv("VMHOST_GOLDFISH_GRALLOC", "1", 1);
         if (p9_sar && !p71) {
-            /* p9 的 framework UI 走 gfxstream，goldfish_fb 只覆盖 bootanim。
-               同时启用 post callback，让 frame relay 也能拿到 launcher 帧。 */
-            setenv("VMHOST_GFX_POST", "1", 1);
-            LOGI("p9: goldfish_fb + gfxstream post callback 双通道");
+            /* p9 的旧 guest 用 goldfish_fb 做最终显示；GOLDFISH_GRALLOC 已
+               修复 color buffer。保持单写者，避免 post callback/桥双写
+               干扰 frame.shm 和 SystemUI 启动。 */
+            unsetenv("VMHOST_GFX_POST");
+            LOGI("p9: goldfish_fb + GOLDFISH_GRALLOC（单写者）");
         } else {
             unsetenv("VMHOST_GFX_POST");
         }
