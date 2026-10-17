@@ -1207,6 +1207,74 @@ PY
 
 patch_virtio_tablet_direct
 
+# p9/p71 的 first-stage init 只读设备树里的 fstab（ramdisk 里的 fstab.ranchu 不生效）。
+# ranchu.c 只建了 /firmware/android，没有 fstab 子节点，于是 Android 9/7.1 会报
+# "First stage mount skipped (missing/incompatible fstab in device tree)"，
+# 接着 /system 挂不上、SELinux 策略读不到，直接 reboot。
+# 这里补一个标准 DT fstab：p9/p71 的 SDK 镜像是 GPT 单分区盘，
+# system/vendor 实际是 vda1/vdb1（userdata 是整盘 ext4，vdc）。
+patch_ranchu_dt_fstab() {
+    local f="$SRC_DIR/hw/arm/ranchu.c"
+    [ -f "$f" ] || { echo "找不到 $f" >&2; return 1; }
+    if grep -q "VMHOST_DT_FSTAB" "$f"; then
+        echo "==> ranchu DT fstab 补丁已存在，跳过"
+        return 0
+    fi
+    echo "==> 打补丁（ranchu 设备树 fstab）"
+    python3 - "$f" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+src = path.read_text(encoding="utf-8")
+anchor = '    qemu_fdt_setprop_string(fdt, "/firmware/android", "hardware", "ranchu");\n'
+add = '''    qemu_fdt_setprop_string(fdt, "/firmware/android", "hardware", "ranchu");
+
+    /* VMHOST_DT_FSTAB: Android 9 / 7.1 的 first-stage init 只认设备树 fstab。 */
+    qemu_fdt_add_subnode(fdt, "/firmware/android/fstab");
+    qemu_fdt_setprop_string(fdt, "/firmware/android/fstab",
+                            "compatible", "android,fstab");
+
+    qemu_fdt_add_subnode(fdt, "/firmware/android/fstab/system");
+    qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/system",
+                            "dev", "/dev/block/vda1");
+    qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/system",
+                            "type", "ext4");
+    qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/system",
+                            "mnt_flags", "ro");
+    qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/system",
+                            "fsmgr_flags", "wait");
+
+    qemu_fdt_add_subnode(fdt, "/firmware/android/fstab/vendor");
+    qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/vendor",
+                            "dev", "/dev/block/vdb1");
+    qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/vendor",
+                            "type", "ext4");
+    qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/vendor",
+                            "mnt_flags", "ro");
+    qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/vendor",
+                            "fsmgr_flags", "wait");
+
+    qemu_fdt_add_subnode(fdt, "/firmware/android/fstab/data");
+    qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/data",
+                            "dev", "/dev/block/vdc");
+    qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/data",
+                            "type", "ext4");
+    qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/data",
+                            "mnt_flags", "noatime,nosuid,nodev,barrier=1");
+    qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/data",
+                            "fsmgr_flags", "wait,check");
+'''
+if anchor not in src:
+    raise SystemExit("ranchu.c hardware 锚点未找到")
+src = src.replace(anchor, add, 1)
+path.write_text(src, encoding="utf-8")
+print("    已修改: hw/arm/ranchu.c")
+PY
+}
+
+patch_ranchu_dt_fstab
+
 # 诊断插桩：goldfish_pipe 恢复时到底读到什么、哪一步映射失败
 # （跨进程快照恢复时 pipe 的 signalled buffer / open command 要重新映射回宿主
 #  地址空间，失败就 -EIO 终止整次恢复。先量清楚再改语义。）

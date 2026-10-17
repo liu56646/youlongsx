@@ -829,7 +829,7 @@ static int spawn_qemu_child(const VmQemuParams *p, const char *exe_path, const c
     add_arg("%s",
             "console=ttyAMA0 androidboot.hardware=ranchu androidboot.selinux=permissive "
             "androidboot.veritymode=disabled androidboot.force_normal_boot=1 "
-            "rdinit=/dumper ignore_loglevel panic=0 printk.devkmsg=on audit=0");
+            "rdinit=/init ignore_loglevel panic=0 printk.devkmsg=on audit=0");
 
     /* 盘序必须与 exp47（ranchu 实测）一致。ranchu 机器上 virtio-blk 的 vdX 字母
        与挂载顺序**相反**：先挂 data 得到 vdf、最后挂 system 得到 vda，
