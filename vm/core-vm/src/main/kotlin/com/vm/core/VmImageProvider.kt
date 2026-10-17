@@ -37,6 +37,12 @@ class VmImageProvider(private val context: Context) {
     fun userDataTemplate(tag: String): File = File(imageDir(tag), "userdata.img")
 
     /**
+     * Android 9 FDE 的加密 footer/key 盘模板（16MB raw）。
+     * 没有这个文件的镜像（p11/p13/p71）返回不存在的 File，调用方按可选处理。
+     */
+    fun encryptionKeyTemplate(tag: String): File = File(imageDir(tag), "encryptionkey.img")
+
+    /**
      * product / system 分区镜像模板（含 build.prop 设备身份）。
      * 实例选择自定义机型时会以它们为模板复制再改写，见 [VmDiskStore.ensureDeviceImages]。
      */

@@ -30,17 +30,25 @@ bool vm_qmp_is_connected(void);
 /**
  * 注入一次触摸。
  *
- * guest 侧只有 virtio-tablet（单指绝对指针），所以这里发的是
- * 「绝对坐标 + 左键」：
- *   按下：abs(x) → abs(y) → btn(left, down=true)
+ * p11/p13 的 guest 侧是 virtio-tablet（单指绝对指针），用 BTN_TOUCH 语义；
+ * p9/p71 走 goldfish-events，用鼠标左键位表示触摸。坐标事件两者相同：
+ *   按下：abs(x) → abs(y) → btn(touch 或 left, down=true)
  *   移动：abs(x) → abs(y)
- *   抬起：btn(left, down=false)
+ *   抬起：btn(touch 或 left, down=false)
  *
  * @param x, y        访客画面内像素坐标
  * @param max_x,max_y 访客画面尺寸（换算成 virtio-input 的 0..0x7FFF 绝对坐标域）
  * @param down        true=按下/移动，false=抬起
  */
 void vm_qmp_touch(int x, int y, int max_x, int max_y, bool down);
+
+/**
+ * 切换触摸按下使用的 QMP 按钮名。
+ *
+ * p11/p13 的 virtio-tablet 必须用 "touch"；p9/p71 的 goldfish-events 绝对鼠标
+ * 处理器只看 buttons_state 的 bit0，必须用 "left"。默认是 "touch"。
+ */
+void vm_qmp_set_legacy_touch(bool legacy);
 
 /**
  * 注入一次按键（Linux keycode，见 linux/input-event-codes.h）。

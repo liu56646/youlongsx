@@ -44,6 +44,8 @@ class VmRepository(context: Context) {
             // 数据盘必须以镜像里的 userdata.img 为模板（已格式化的空分区），
             // 否则访客首启会卡在挂载 /data。
             disk.ensureUserData(id, images.userDataTemplate(imageTag))
+            // Android 9 FDE 的 key/footer 盘；没有该模板的版本返回 null。
+            disk.ensureEncryptionKey(id, images.encryptionKeyTemplate(imageTag))
             // metadata 盘（FBE 元数据）必须存在，否则盘序错位、guest 起不来。
             disk.ensureMetadata(id, images.metadataTemplate(imageTag))
             // 设备身份：选了机型才复制并改写实例级 product.img / system.img

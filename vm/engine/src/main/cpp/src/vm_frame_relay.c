@@ -346,7 +346,11 @@ static bool shm_try_open(void)
     s_shm_fd = fd;
     s_shm = h;
     s_shm_len = (size_t)st.st_size;
-    s_shm_last_seq = h->seq;
+    /* Deliver the frame already present when we first map the shared memory.
+       p71/goldfish_fb may publish its first UI frame before this process gets
+       scheduled; initializing to h->seq would hide that frame until another
+       update, which can leave a static boot screen black. */
+    s_shm_last_seq = 0;
     LOGI("共享内存帧回传就绪：%s（disp %ux%u stride=%u n=%u）",
          path, h->disp_w, h->disp_h, h->stride_cap, h->nbufs);
     return true;
@@ -357,6 +361,11 @@ static bool shm_poll(int req_w, int req_h,
                      const uint8_t **rgba, int *w, int *h, uint64_t *seq)
 {
     const uint32_t s = __atomic_load_n(&s_shm->seq, __ATOMIC_ACQUIRE);
+    /* 新 VM 进程会把 seq 重置为 0；旧映射若还留着上一次的高水位，
+       不归零就会一直等到新 seq 超过它才出图。 */
+    if (s < s_shm_last_seq) {
+        s_shm_last_seq = 0;
+    }
     if (s == 0 || (uint64_t)s == s_shm_last_seq) {
         /* 共享内存路径不需要请求文件：写端只要访客出新帧就会发布。
            这里直接返回"还没有新帧"即可（省掉每 16ms 一次的文件写入）。 */

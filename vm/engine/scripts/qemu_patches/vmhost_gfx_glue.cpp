@@ -171,6 +171,22 @@ static void vmhost_gfx_log(const char* fmt, ...) {
     va_end(ap);
 }
 
+// p71 uses the ranchu goldfish_fb, not virtio-gpu. Its pixels are published
+// by ui/vmhost_goldfish_fb.c into frame.shm; leave gfxstream's post callback
+// and screenshot thread disabled in that mode so there is only one writer.
+static bool vmhost_gfx_goldfish_fb_mode(void) {
+    const char* v = getenv("VMHOST_GOLDFISH_FB");
+    return v != NULL && strcmp(v, "1") == 0;
+}
+
+// p9 keeps the goldfish_fb bridge for the boot path but the framework UI is
+// rendered through gfxstream.  Capture both: the bridge covers bootanim,
+// the post callback covers the framework.
+static bool vmhost_gfx_post_mode(void) {
+    const char* v = getenv("VMHOST_GFX_POST");
+    return v != NULL && strcmp(v, "1") == 0;
+}
+
 // -------------------- 共享内存帧回传（v3，替代 frame.rgba 文件）--------------
 // 布局见 vm_frame_shm.h。写端把最新帧 memcpy 进轮转缓冲并 release 递增 seq；
 // App 进程 mmap 同一文件按 seq 取帧 —— 省掉每帧 open/write/rename 三条系统
@@ -506,6 +522,15 @@ extern "C" int vmhost_gfx_init(void) {
     setenv("ANDROID_EGL_ON_EGL", "1", 1);
 
     sVmHostRenderLib = new gfxstream::RenderLibImpl();
+    {
+        const char* goldfishGralloc = getenv("VMHOST_GOLDFISH_GRALLOC");
+        if (goldfishGralloc != NULL && strcmp(goldfishGralloc, "1") == 0) {
+            sVmHostRenderLib->setGrallocImplementation(GOLDFISH_GRALLOC);
+            vmhost_gfx_log("gralloc implementation: GOLDFISH_GRALLOC");
+        } else {
+            vmhost_gfx_log("gralloc implementation: MINIGBM");
+        }
+    }
     android_setOpenglesEmulation(sVmHostRenderLib, nullptr, nullptr);
 
     // 4. 启动渲染器
@@ -536,11 +561,13 @@ extern "C" int vmhost_gfx_init(void) {
         free(version);
 
         // D1f：注册 post callback，直接抓每次显示的帧像素（与传输路径无关）。
-        {
+        if (!vmhost_gfx_goldfish_fb_mode() || vmhost_gfx_post_mode()) {
             const gfxstream::RendererPtr& r = android_getOpenglesRenderer();
             r->setPostCallback(vmhost_gfx_on_post, nullptr, 0,
                                /*useBgraReadback*/ false);
             vmhost_gfx_log("已注册 post callback（displayId=0，直接抓帧）");
+        } else {
+            vmhost_gfx_log("p9/p71 goldfish_fb 模式：跳过 gfxstream post callback");
         }
     }
 
@@ -573,19 +600,25 @@ extern "C" int vmhost_gfx_init(void) {
     // 6. 截图回传线程（D1a）：读 VMHOST_FRAME_DIR，非空就起后台线程，
     //    轮询 frame.request → 截图 frame.ppm + frame.seq。B1 子进程模式下
     //    由 vm_qemu.c spawn 时 setenv 注入，目录即 <dataDir>/logs。
-    {
+    if (!vmhost_gfx_goldfish_fb_mode() || vmhost_gfx_post_mode()) {
         const char* fd = getenv("VMHOST_FRAME_DIR");
         if (fd != NULL && fd[0] != '\0') {
             snprintf(s_frame_dir, sizeof(s_frame_dir), "%s", fd);
             // 建共享内存回传（首选路径）；失败则线程回退文件回传。
             vmhost_gfx_shm_open(dispW, dispH);
-            pthread_t tid;
-            if (pthread_create(&tid, NULL, vmhost_gfx_screen_thread, NULL) == 0) {
-                vmhost_gfx_log("截图回传线程已启动（frame_dir=%s）", s_frame_dir);
+            if (!vmhost_gfx_goldfish_fb_mode()) {
+                pthread_t tid;
+                if (pthread_create(&tid, NULL, vmhost_gfx_screen_thread, NULL) == 0) {
+                    vmhost_gfx_log("截图回传线程已启动（frame_dir=%s）", s_frame_dir);
+                } else {
+                    vmhost_gfx_log("截图回传线程启动失败");
+                }
             } else {
-                vmhost_gfx_log("截图回传线程启动失败");
+                vmhost_gfx_log("p9: gfxstream post callback + goldfish_fb 双通道");
             }
         }
+    } else {
+        vmhost_gfx_log("p9/p71 goldfish_fb 模式：帧由 ui/vmhost_goldfish_fb.c 回传");
     }
 
     // 7. D16（surfaceless make-current 的工作区修复）**已停用**：

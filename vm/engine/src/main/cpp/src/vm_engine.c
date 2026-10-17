@@ -196,6 +196,24 @@ static int json_get_int(const char *json, const char *key, int fallback)
     return (int) v;
 }
 
+/** GPT 头位于 LBA1（偏移 512），签名是 "EFI PART"。 */
+static bool file_is_gpt(const char *path)
+{
+    if (path == NULL) {
+        return false;
+    }
+    FILE *f = fopen(path, "rb");
+    if (f == NULL) {
+        return false;
+    }
+    char sig[8];
+    const bool gpt = fseek(f, 512, SEEK_SET) == 0 &&
+                     fread(sig, 1, sizeof(sig), f) == sizeof(sig) &&
+                     memcmp(sig, "EFI PART", sizeof(sig)) == 0;
+    fclose(f);
+    return gpt;
+}
+
 /** 依据实例配置拼出 QEMU 启动参数并拉起 QEMU。 */
 static void vm_engine_boot_qemu(void)
 {
@@ -212,12 +230,21 @@ static void vm_engine_boot_qemu(void)
     snprintf(s_path_kernel, sizeof(s_path_kernel), "%s/kernel", s_image_dir);
     snprintf(s_path_initrd, sizeof(s_path_initrd), "%s/ramdisk.img", s_image_dir);
     /* system.img 同样支持实例级覆盖：设备身份要同时落在 system 分区（fingerprint 的
-       版本段来自这里），详见 docs/方案B排障交接.md。实例目录里有就用它，否则回落 base。 */
+       版本段来自这里），详见 docs/方案B排障交接.md。实例目录里有就用它，否则回落 base。
+       但 p9 的 base 是 GPT 单分区盘，p11/p13/p71 的 system.img 是纯 ext4；
+       旧实例可能遗留不同布局的 system.img，直接复用会让 p9 的 /dev/vda1 消失。
+       布局不一致时回退 base。 */
+    char base_system[PATH_CAP];
+    snprintf(base_system, sizeof(base_system), "%s/system.img", s_image_dir);
+    const bool base_system_gpt = file_is_gpt(base_system);
     snprintf(s_path_system, sizeof(s_path_system), "%s/system.img", s_data_dir);
     {
         struct stat sst;
-        if (stat(s_path_system, &sst) != 0 || !S_ISREG(sst.st_mode)) {
-            snprintf(s_path_system, sizeof(s_path_system), "%s/system.img", s_image_dir);
+        const bool override_ok =
+            stat(s_path_system, &sst) == 0 && S_ISREG(sst.st_mode) &&
+            (!base_system_gpt || file_is_gpt(s_path_system));
+        if (!override_ok) {
+            snprintf(s_path_system, sizeof(s_path_system), "%s", base_system);
         }
     }
     snprintf(s_path_vendor, sizeof(s_path_vendor), "%s/vendor.img", s_image_dir);

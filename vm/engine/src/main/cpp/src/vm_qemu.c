@@ -28,6 +28,7 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -81,6 +82,49 @@ static void add_arg(const char *fmt, ...)
 static bool file_ok(const char *path)
 {
     return path != NULL && access(path, R_OK) == 0;
+}
+
+/** 取镜像目录里与 [base_path] 同级的文件；成功返回 true。 */
+static bool image_sibling(const char *base_path, const char *name,
+                          char *out, size_t out_len)
+{
+    if (base_path == NULL || name == NULL || out == NULL || out_len == 0) {
+        return false;
+    }
+    snprintf(out, out_len, "%s", base_path);
+    char *slash = strrchr(out, '/');
+    if (slash == NULL) {
+        return false;
+    }
+    snprintf(slash + 1, out_len - (size_t) (slash + 1 - out), "%s", name);
+    return file_ok(out);
+}
+
+/**
+ * Detect the standalone-ext4 layout used by p11/p13 (and p71's whole-disk
+ * system image).
+ *
+ * p9 is the exception: its system.img is a GPT disk (partition 1 is vda1).
+ * p11/p13 package every logical partition as a standalone ext4 file and carry
+ * a complete first-stage fstab in the ramdisk, so the legacy DT fstab must not
+ * be added there. p71 also ships a whole ext4 system image and uses the fstab
+ * repacked into its ramdisk.
+ */
+static bool image_is_plain_ext4(const char *path)
+{
+    if (!file_ok(path)) {
+        return false;
+    }
+
+    unsigned char magic[2];
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        return false;
+    }
+
+    ssize_t n = pread(fd, magic, sizeof(magic), 0x438);
+    close(fd);
+    return n == (ssize_t) sizeof(magic) && magic[0] == 0x53 && magic[1] == 0xEF;
 }
 
 /** 把参数列表打到日志，便于现场排查。 */
@@ -208,12 +252,18 @@ static bool self_lib_dir(char *out, size_t out_len)
  *     （console.log 可见 "Loaded kernel module .../virtio_blk.ko"），内核才有
  *     virtio-blk 能力；此时 MMIO 就能认盘，且盘符是**反序**（先加的 data 落到
  *     vdf），p11 的 fstab 就是按反序写的。
- *   - p9/p13 的 SDK 原版 ramdisk **没有 virtio_blk.ko**，所以无论 MMIO 还是
- *     PCI，console.log 里连 "virtio" 字样都不出现（init 一直报
- *     "partition(s) not found in /sys"）。它们缺的是**内核模块**，不是传输方式。
+ *   - p9 的 4.4 SDK kernel 里 VIRTIO_BLK / VIRTIO_MMIO 都是内建的，
+ *     不需要 ramdisk 模块；它的问题在 GPT uevent/by-name 与 SAR 根挂载。
+ *   - p13 的 ramdisk/内核组合不同，走单独的 physical-ext4 路径。
  *   - 切到 PCI 时盘符变**正序**（vda=data、vdf=system），fstab 要跟着反过来写。 */
 static bool blk_use_pci(void)
 {
+    /* p9 SAR 启动依赖 virtio-mmio 的盘符顺序（system 最后添加 -> vda）。
+       PCI 会改变枚举顺序，而且调试开关不应该破坏已适配的启动路径。 */
+    const char *sar = getenv("VMHOST_SAR");
+    if (sar != NULL && sar[0] == '1') {
+        return false;
+    }
     const char *v = getenv("VMHOST_BLK_PCI");
     return v != NULL && v[0] == '1';
 }
@@ -225,6 +275,66 @@ static void add_blk_dev(const char *id, const char *path, bool readonly)
             id, path, readonly ? ",readonly=on" : "");
     add_arg("%s", "-device");
     add_arg(blk_use_pci() ? "virtio-blk-pci,drive=%s" : "virtio-blk-device,drive=%s", id);
+}
+
+/**
+ * p71（Android 7.1 / API 25）的内核是 Linux 3.18，早于 virtio 1.0。
+ * 当前 ranchu 的 virtio-mmio 传输默认是 modern，必须对它切回 legacy，
+ * 否则 virtio-blk 根本不会 probe，init 会报 partition(s) not found。
+ *
+ * 镜像目录固定是 .../images/p71_arm64，用 ramdisk 路径识别比按内核版本
+ * 解析二进制更稳，也不会影响 p11 的 modern virtio-input。
+ */
+static bool guest_is_p71_api25(const VmQemuParams *p)
+{
+    if (p == NULL) {
+        return false;
+    }
+
+    const char *paths[] = {
+        p->initrd_path,
+        p->kernel_path,
+        p->system_img_path,
+    };
+    for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+        if (paths[i] != NULL && strstr(paths[i], "p71_arm64") != NULL) {
+            return true;
+        }
+    }
+
+    /* The image tag may be renamed when imported. make_guest_image.sh puts
+       this marker next to ramdisk.img, so layout detection stays reliable. */
+    char marker[ARG_CAP];
+    return image_sibling(p->initrd_path, "vmhost_guest_p71",
+                         marker, sizeof(marker));
+}
+
+/**
+ * p9（Android 9 / API 28）的 system.img 是 system-as-root（SAR）：
+ * 内核必须直接 root=/dev/vda1，init 不能再把 system 挂到 /。
+ * 镜像目录固定是 .../images/p9_arm64；打包脚本还会在 kernel 旁放
+ * vmhost_guest_p9，镜像改名后也能识别。
+ */
+static bool guest_is_p9_api28(const VmQemuParams *p)
+{
+    if (p == NULL) {
+        return false;
+    }
+
+    const char *paths[] = {
+        p->system_img_path,
+        p->kernel_path,
+        p->initrd_path,
+    };
+    for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+        if (paths[i] != NULL && strstr(paths[i], "p9_arm64") != NULL) {
+            return true;
+        }
+    }
+
+    char marker[ARG_CAP];
+    return image_sibling(p->kernel_path, "vmhost_guest_p9",
+                         marker, sizeof(marker));
 }
 
 /** 子进程 QEMU 是否还活着（顺带回收，并记录退出原因）。 */
@@ -731,6 +841,7 @@ static int spawn_qemu_child(const VmQemuParams *p, const char *exe_path, const c
 {
     const int mem = (p->memory_mb > 0) ? p->memory_mb : 2048;
     const int cores = (p->cores > 0) ? p->cores : 4;
+    const bool p9_sar = guest_is_p9_api28(p);
 
     /* aemu 快照的标记文件（<dataDir>/snapshot.state）：存在 = 上次保存成功 */
     snap_state_path_from(p->userdata_img_path, s_snap_state_file,
@@ -741,6 +852,30 @@ static int spawn_qemu_child(const VmQemuParams *p, const char *exe_path, const c
     const bool want_kvm = p->backend_name &&
                           strcmp(p->backend_name, "KVM") == 0 &&
                           kvm_dev_available();
+    const bool p71 = guest_is_p71_api25(p);
+    /* p9/p71 的显示/输入都走 classic ranchu goldfish；p11/p13 才用
+       virtio-gpu + virtio-input。 */
+    const bool goldfish_input = p71 || p9_sar;
+    const bool goldfish_display = p71 || p9_sar;
+    vm_qmp_set_legacy_touch(goldfish_input);
+    if (goldfish_display) {
+        setenv("VMHOST_GOLDFISH_FB", "1", 1);
+        setenv("VMHOST_GOLDFISH_GRALLOC", "1", 1);
+        if (p9_sar && !p71) {
+            /* p9 的 framework UI 走 gfxstream，goldfish_fb 只覆盖 bootanim。
+               同时启用 post callback，让 frame relay 也能拿到 launcher 帧。 */
+            setenv("VMHOST_GFX_POST", "1", 1);
+            LOGI("p9: goldfish_fb + gfxstream post callback 双通道");
+        } else {
+            unsetenv("VMHOST_GFX_POST");
+        }
+        LOGI("%s: goldfish_fb 软件帧缓冲模式（frame.shm）",
+             p9_sar ? "p9" : "p71");
+    } else {
+        unsetenv("VMHOST_GOLDFISH_FB");
+        unsetenv("VMHOST_GOLDFISH_GRALLOC");
+        unsetenv("VMHOST_GFX_POST");
+    }
 
     s_argc = 0;
     s_child_mode = true;
@@ -788,6 +923,23 @@ static int spawn_qemu_child(const VmQemuParams *p, const char *exe_path, const c
        （aarch64 上 MAX_CODE_GEN_BUFFER_SIZE 是 size_t 上限，不受限）。 */
     add_arg("%s", "-tb-size");
     add_arg("%d", 512);
+    if (p71) {
+        /* p71 的 Linux 3.18 只认 legacy virtio-mmio。p9 的 4.4 内核支持
+           modern virtio，不要动它。 */
+        add_arg("%s", "-global");
+        add_arg("%s", "virtio-mmio.force_legacy=on");
+    }
+    if (goldfish_input) {
+        /* p9/p71 的输入走 ranchu 自带的 goldfish-events。打开单点触摸/键盘；
+           关闭 multitouch，让 QMP 的 ABS_X/Y + 左键落到传统 BTN_TOUCH 路径。 */
+        add_arg("%s", "-global");
+        add_arg("%s", "goldfish-events.have-touch=on");
+        add_arg("%s", "-global");
+        add_arg("%s", "goldfish-events.have-multitouch=off");
+        add_arg("%s", "-global");
+        add_arg("%s", "goldfish-events.have-keyboard=on");
+        LOGI("%s: goldfish-events 输入已启用", p9_sar ? "p9" : "p71");
+    }
     add_arg("%s", "-M");
     add_arg("%s", "ranchu");
     add_arg("%s", "-cpu");
@@ -815,7 +967,7 @@ static int spawn_qemu_child(const VmQemuParams *p, const char *exe_path, const c
     add_arg("%d", mem);
     add_arg("%s", "-kernel");
     add_arg("%s", p->kernel_path);
-    if (file_ok(p->initrd_path)) {
+    if (!p9_sar && file_ok(p->initrd_path)) {
         add_arg("%s", "-initrd");
         add_arg("%s", p->initrd_path);
     }
@@ -826,21 +978,60 @@ static int spawn_qemu_child(const VmQemuParams *p, const char *exe_path, const c
          （实测报 "Unable to move mount at '/dev'" → InitFatalReboot）；
        - audit=0 很关键：permissive 下 avc 会刷出几千行，占串口 I/O 又吃 CPU。 */
     add_arg("%s", "-append");
-    add_arg("%s",
-            "console=ttyAMA0 androidboot.hardware=ranchu androidboot.selinux=permissive "
-            "androidboot.veritymode=disabled androidboot.force_normal_boot=1 "
-            "rdinit=/init ignore_loglevel panic=0 printk.devkmsg=on audit=0");
+    if (p9_sar) {
+        /* p9 的 system.img 是 system-as-root：让内核直接把 vda1 挂成 /。
+           此时 QEMU 侧不下发 system fstab 节点（VMHOST_SAR=1），
+           init 只负责 vendor/data，避免对 / 再 mount 一次得到 EBUSY。 */
+        add_arg("%s",
+                "console=ttyAMA0 root=/dev/vda1 ro rootwait rootfstype=ext4 init=/init "
+                "androidboot.hardware=ranchu androidboot.selinux=permissive "
+                "androidboot.veritymode=disabled androidboot.force_normal_boot=1 "
+                "ignore_loglevel panic=0 printk.devkmsg=on audit=0");
+    } else {
+        add_arg("%s",
+                "console=ttyAMA0 androidboot.hardware=ranchu androidboot.selinux=permissive "
+                "androidboot.veritymode=disabled androidboot.force_normal_boot=1 "
+                "rdinit=/init ignore_loglevel panic=0 printk.devkmsg=on audit=0");
+    }
 
     /* 盘序必须与 exp47（ranchu 实测）一致。ranchu 机器上 virtio-blk 的 vdX 字母
        与挂载顺序**相反**：先挂 data 得到 vdf、最后挂 system 得到 vda，
        实测映射 vda=system vdb=vendor vdc=product vdd=system_ext vde=metadata
        vdf=data，正好满足访客 fstab。顺序错/缺一块都会 InitFatalReboot。 */
-    if (file_ok(p->userdata_img_path))   add_blk_dev("d0data", p->userdata_img_path, false);
-    if (file_ok(p->metadata_img_path))   add_blk_dev("d1meta", p->metadata_img_path, false);
-    if (file_ok(p->system_ext_img_path)) add_blk_dev("d2sext", p->system_ext_img_path, true);
-    if (file_ok(p->product_img_path))    add_blk_dev("d3prod", p->product_img_path, true);
-    if (file_ok(p->vendor_img_path))     add_blk_dev("d4vend", p->vendor_img_path, true);
-    if (file_ok(p->system_img_path))     add_blk_dev("d5sys",  p->system_img_path, true);
+    if (p9_sar) {
+        /* p9 的 vendor fstab 是 FDE（不是 FBE）：
+             /dev/block/vdc /data ... forceencrypt=/dev/block/vdd
+           vdd 是加密 footer/key 盘，不能省。把它排在 data 之前添加，
+           反序后才得到 data=vdc、encryptionkey=vdd（system=vda、vendor=vdb）。
+           优先用实例目录里的副本：FDE key 绝不能跨实例共享。 */
+        char enc_path[ARG_CAP];
+        bool enc_ok = image_sibling(p->userdata_img_path, "encryptionkey.img",
+                                    enc_path, sizeof(enc_path));
+        if (!enc_ok) {
+            enc_ok = image_sibling(p->kernel_path, "encryptionkey.img",
+                                   enc_path, sizeof(enc_path));
+        }
+        if (enc_ok) {
+            add_blk_dev("d0enc", enc_path, false);
+        } else {
+            LOGW("p9: 缺少 encryptionkey.img，/data 的 forceencrypt 会失败");
+        }
+    }
+    if (file_ok(p->userdata_img_path))   add_blk_dev("d1data", p->userdata_img_path, false);
+    /* p9 只有 data/vendor/system (+ encryptionkey) 四块盘，vendor fstab
+       固定写 data=/dev/block/vdc。实例目录若遗留 p11 的 metadata/product/
+       system_ext，会把 data 挤到别的 vdX；这里对 SAR 访客强制只挂这些盘。 */
+    if (!p9_sar && file_ok(p->metadata_img_path)) {
+        add_blk_dev("d2meta", p->metadata_img_path, false);
+    }
+    if (!p9_sar && file_ok(p->system_ext_img_path)) {
+        add_blk_dev("d3sext", p->system_ext_img_path, true);
+    }
+    if (!p9_sar && file_ok(p->product_img_path)) {
+        add_blk_dev("d4prod", p->product_img_path, true);
+    }
+    if (file_ok(p->vendor_img_path))     add_blk_dev("d5vend", p->vendor_img_path, true);
+    if (file_ok(p->system_img_path))     add_blk_dev("d6sys",  p->system_img_path, true);
 
     add_arg("%s", "-device");
     add_arg("%s", "virtio-rng-device");
@@ -854,8 +1045,10 @@ static int spawn_qemu_child(const VmQemuParams *p, const char *exe_path, const c
        挂在 virtio-mmio 上时父设备不是 PCI 设备 → pdev == NULL →
        virtio_gpu_init 在 `ldr x8,[x0,#0x5c8]` 上 NULL 解引用，guest 内核 panic。
        Android 模拟器本来就是 virtio-gpu-pci + gfxstream，这里保持一致。 */
-    add_arg("%s", "-device");
-    add_arg("%s", "virtio-gpu-pci");
+    if (!goldfish_display) {
+        add_arg("%s", "-device");
+        add_arg("%s", "virtio-gpu-pci");
+    }
 
     /* 输入设备：virtio-input（virtio-tablet-device + virtio-keyboard-device）。
        此前因 ranchu 的 virtio-mmio 传输是 legacy（VIRT_VERSION=1，无
@@ -866,10 +1059,12 @@ static int spawn_qemu_child(const VmQemuParams *p, const char *exe_path, const c
        VIRTIO_F_VERSION_1，且 DEVICE_FEATURES 正确暴露高 32 位（bit32 在其中）。
        virtio-tablet 提供绝对坐标（Android 识别为触摸/指针），virtio-keyboard
        提供按键。 */
-    add_arg("%s", "-device");
-    add_arg("%s", "virtio-tablet-device");
-    add_arg("%s", "-device");
-    add_arg("%s", "virtio-keyboard-device");
+    if (!goldfish_input) {
+        add_arg("%s", "-device");
+        add_arg("%s", "virtio-tablet-device");
+        add_arg("%s", "-device");
+        add_arg("%s", "virtio-keyboard-device");
+    }
 
     /* QMP socket：输入注入的**跨进程**通道。
        B1 模式下 QEMU 在子进程、输入代码在父进程，而 ui_vmhost.c 的 s_con 只在
@@ -1209,6 +1404,21 @@ int vm_qemu_start(const VmQemuParams *p)
              p->system_img_path ? p->system_img_path : "(null)");
         return -1;
     }
+
+    /* p13 uses standalone ext4 partitions and a complete first-stage fstab in
+       its ramdisk. Keep the legacy DT fstab for GPT guests such as p9. */
+    const bool physical_layout = image_is_plain_ext4(p->system_img_path);
+    setenv("VMHOST_DT_FSTAB", physical_layout ? "none" : "legacy", 1);
+    const bool p9_sar = guest_is_p9_api28(p);
+    if (p9_sar) {
+        setenv("VMHOST_SAR", "1", 1);
+    } else {
+        unsetenv("VMHOST_SAR");
+    }
+    LOGI("guest disk layout: %s (VMHOST_DT_FSTAB=%s, SAR=%d)",
+         physical_layout ? "physical-ext4" : "gpt",
+         physical_layout ? "none" : "legacy", p9_sar ? 1 : 0);
+
     s_started = true;
     s_running = true;
     s_argc = 0;

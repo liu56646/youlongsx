@@ -7,12 +7,16 @@ package com.vm.core
  * @param displayName 界面上展示的名字
  * @param apiLevel    对应的 Android API 级别
  * @param zipMb       压缩包大小（约），用于提示用户要下多少流量
+ * @param supportsDeviceProfile 该镜像是否支持实例级机型身份改写。
+ *                     依赖镜像包里有 product.img / system.img 且 build.prop
+ *                     带 `# begin` 段标记；缺 product 的镜像直接不支持。
  */
 data class VmGuestImage(
     val tag: String,
     val displayName: String,
     val apiLevel: Int,
-    val zipMb: Int
+    val zipMb: Int,
+    val supportsDeviceProfile: Boolean = true
 )
 
 /**
@@ -32,20 +36,24 @@ object VmGuestCatalog {
     /**
      * 可选的访客系统版本 —— **只登记实测能跑起来的**。
      *
-     * p71(7.1) / p9(9) / p13(13) 的 SDK 原版镜像与本引擎的 ranchu 适配层不兼容：
-     *   - ramdisk 里没有匹配内核版本的 `virtio_blk.ko`（p11 是项目专门配的 40 个 .ko），
-     *     内核压根不认 virtio-blk，init 一直报 "partition(s) not found in /sys"；
-     *   - p9/p13 还是 GPT + super 动态分区，引擎挂的是整盘，路径也对不上；
-     *   - p9 的 first-stage init 只认设备树里的 fstab，p71 连 vendor 分区都没有。
-     * 三者实测都在 init 阶段起不来。列出来只会让用户选了就失败，因此暂不登记。
-     * 适配路径与阻塞点见 docs/方案B排障交接.md。
+     * 各版本的启动差异由引擎按镜像布局自动分流（vm_qemu.c）：
+     *   - p11/p13：GPT / 纯 ext4 分区盘 + virtio-gpu + virtio-input；
+     *   - p9：system-as-root（root=/dev/vda1，不下发 initrd），强制 virtio-mmio 保盘序；
+     *   - p71：Linux 3.18 → legacy virtio-mmio + goldfish-events 输入 + goldfish_fb 帧回传。
+     *
+     * 机型身份改写对 p11/p13 提供：p71/p9 的包里没有 product 分区，
+     * 创建时直接跳过机型选择，使用镜像出厂身份。p13 的 product.img 没有
+     * `# begin` 段标记，VmDeviceIdentity 会走同长度无标记 build.prop 改写。
      */
     val ALL: List<VmGuestImage> = listOf(
         VmGuestImage("p11_arm64", "Android 11", 30, 506),
+        VmGuestImage("p9_arm64", "Android 9", 28, 396, supportsDeviceProfile = false),
+        VmGuestImage("p71_arm64", "Android 7.1", 25, 292, supportsDeviceProfile = false),
+        VmGuestImage("p13_arm64", "Android 13", 33, 592),
     )
 
     /** 规划中的版本（暂不可用），仅用于界面提示，不要放进 [ALL]。 */
-    val PLANNED_HINT: String = "Android 7.1 / 9 / 13 适配中"
+    val PLANNED_HINT: String = "更多 Android 版本适配中"
 
     fun byTag(tag: String): VmGuestImage? = ALL.firstOrNull { it.tag == tag }
 

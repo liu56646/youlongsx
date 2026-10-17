@@ -38,7 +38,8 @@
 │  ├─ VM性能诊断与优化方案.md  # 性能根因诊断与优化清单
 │  ├─ 改动说明-共享内存帧回传.md
 │  ├─ 改动说明-启动提速(前台服务+大核).md
-│  └─ 改动说明-输入延迟(fire-and-forget).md
+│  ├─ 改动说明-输入延迟(fire-and-forget).md
+│  └─ 改动说明-多镜像适配.md
 └─ vm/                         # Android 工程（YoulongSandbox）
    ├─ app/                     # L1 宿主 UI
    ├─ core-vm/                 # L2 实例管理

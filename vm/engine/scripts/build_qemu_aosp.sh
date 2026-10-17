@@ -1207,16 +1207,164 @@ PY
 
 patch_virtio_tablet_direct
 
+# p71 的显示走 ranchu goldfish_fb，而不是 virtio-gpu。AOSP QEMU 没有
+# 编 ui_vmhost.c，所以 gfxstream 的 post callback 永远拿不到 goldfish_fb
+# 的像素。这里增加一个轻量 DisplayChangeListener，把 goldfish_fb surface
+# 转成 RGBA 后写进同一个 frame.shm；只在 VMHOST_GOLDFISH_FB=1 时启用。
+patch_vmhost_goldfish_fb() {
+    local impl="$TOOLS_DIR/qemu_patches/vmhost_goldfish_fb.c"
+    local shm_hdr="$ENGINE_DIR/src/main/cpp/src/vm_frame_shm.h"
+    local dst="$SRC_DIR/ui/vmhost_goldfish_fb.c"
+    local console="$SRC_DIR/ui/console.c"
+    local mk="$SRC_DIR/ui/Makefile.objs"
+
+    [ -f "$impl" ] || { echo "找不到 $impl" >&2; return 1; }
+    [ -f "$shm_hdr" ] || { echo "找不到 $shm_hdr" >&2; return 1; }
+    cp -f "$impl" "$dst"
+    cp -f "$shm_hdr" "$SRC_DIR/ui/vm_frame_shm.h"
+
+    if ! grep -q "vmhost_goldfish_fb.o" "$mk"; then
+        printf '\n# VMHOST_GOLDFISH_FB\ncommon-obj-y += vmhost_goldfish_fb.o\n' >> "$mk"
+    fi
+
+    python3 - "$console" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+src = path.read_text(encoding="utf-8")
+
+proto_marker = "/* VMHOST_GOLDFISH_FB_PROTO */"
+call_marker = "/* VMHOST_GOLDFISH_FB_CALL */"
+if call_marker in src:
+    print("    ui/console.c goldfish_fb hook already present")
+    raise SystemExit(0)
+
+if proto_marker not in src:
+    anchor = "QemuConsole *graphic_console_init(DeviceState *dev, uint32_t head,"
+    if anchor not in src:
+        raise SystemExit("ui/console.c graphic_console_init 锚点未找到")
+    proto = (
+        "extern void vmhost_goldfish_fb_attach(QemuConsole *con); "
+        "/* VMHOST_GOLDFISH_FB_PROTO */\n\n"
+    )
+    src = src.replace(anchor, proto + anchor, 1)
+
+anchor = "    dpy_gfx_replace_surface(s, surface);\n    return s;\n"
+replacement = (
+    "    dpy_gfx_replace_surface(s, surface);\n"
+    "    /* VMHOST_GOLDFISH_FB_CALL */\n"
+    "    vmhost_goldfish_fb_attach(s);\n"
+    "    return s;\n"
+)
+if anchor not in src:
+    raise SystemExit("ui/console.c graphic_console_init return 锚点未找到")
+src = src.replace(anchor, replacement, 1)
+path.write_text(src, encoding="utf-8")
+print("    已修改: ui/console.c + ui/Makefile.objs（goldfish_fb 帧回传）")
+PY
+}
+
+patch_vmhost_goldfish_fb
+
+# min_config_qemu_mode() is true in our AVD shim, so vl.c normally forces
+# goldfish_fb into host-GPU mode. In that mode goldfish_fb_write() returns
+# before calling graphic_hw_update(), which is exactly why p71 stayed at
+# frame.seq=0. Keep the guest-GPU framebuffer path for p71 only.
+patch_goldfish_fb_software_fallback() {
+    local f="$SRC_DIR/hw/display/goldfish_fb.c"
+    [ -f "$f" ] || { echo "找不到 $f" >&2; return 1; }
+    if grep -q "VMHOST_GOLDFISH_FB_SOFTWARE" "$f"; then
+        echo "==> goldfish_fb software fallback 补丁已存在，跳过"
+        return 0
+    fi
+    echo "==> 打补丁（goldfish_fb p71 software framebuffer）"
+    python3 - "$f" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+src = path.read_text(encoding="utf-8")
+old = """void goldfish_fb_set_use_host_gpu(int enabled) {
+    s_use_host_gpu = enabled;
+}
+"""
+new = """void goldfish_fb_set_use_host_gpu(int enabled) {
+    /* VMHOST_GOLDFISH_FB_SOFTWARE: p71 has no virtio-gpu driver; force the
+       CPU framebuffer update path so the DCL can publish frames. */
+    if (getenv("VMHOST_GOLDFISH_FB") != NULL &&
+        strcmp(getenv("VMHOST_GOLDFISH_FB"), "1") == 0) {
+        enabled = 0;
+    }
+    s_use_host_gpu = enabled;
+}
+"""
+if old not in src:
+    raise SystemExit("goldfish_fb_set_use_host_gpu 锚点未找到")
+path.write_text(src.replace(old, new, 1), encoding="utf-8")
+print("    已修改: hw/display/goldfish_fb.c")
+PY
+}
+
+patch_goldfish_fb_software_fallback
+
+# goldfish-events 的 key handler 直接把 QKeyCode 枚举值塞进 evdev 队列，
+# 但 Android 7.1 的 GoldfishEvDev 读的是 Linux input code。p71 没有
+# virtio-input 驱动，按键必须走 goldfish-events；这里把 QKeyCode 显式
+# 转成 Linux code（例如 Q_KEY_CODE_VOLUMEUP -> KEY_VOLUMEUP=115）。
+# p11 不使用 goldfish-events 输入，因此该转换不会影响 p11。
+patch_goldfish_events_keymap() {
+    local f="$SRC_DIR/hw/input/goldfish_events.c"
+    [ -f "$f" ] || { echo "找不到 $f" >&2; return 1; }
+    if grep -q "VMHOST_GOLDFISH_KEY_TRANSLATE" "$f"; then
+        echo "==> goldfish-events keycode 转换补丁已存在，跳过"
+        return 0
+    fi
+    echo "==> 打补丁（goldfish-events QKeyCode -> Linux keycode）"
+    python3 - "$f" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+src = path.read_text(encoding="utf-8")
+old = """    int qcode = kv->u.qcode.data;
+
+    goldfish_enqueue_event(s, EV_KEY, qcode, evt->u.key.data->down);
+"""
+new = """    int qcode = kv->u.qcode.data;
+
+    /* VMHOST_GOLDFISH_KEY_TRANSLATE: Android p71 reads Linux evdev codes,
+       while QMP gives us QKeyCode enum values. Translate before enqueueing. */
+    int linux_code = qcode;
+    if (qcode >= 0 && qcode < (int) qemu_input_map_qcode_to_linux_len) {
+        int mapped = qemu_input_map_qcode_to_linux[qcode];
+        if (mapped != 0) {
+            linux_code = mapped;
+        }
+    }
+    goldfish_enqueue_event(s, EV_KEY, linux_code, evt->u.key.data->down);
+"""
+if old not in src:
+    raise SystemExit("goldfish_events.c key handler 锚点未找到")
+path.write_text(src.replace(old, new, 1), encoding="utf-8")
+print("    已修改: hw/input/goldfish_events.c")
+PY
+}
+
+patch_goldfish_events_keymap
+
 # p9/p71 的 first-stage init 只读设备树里的 fstab（ramdisk 里的 fstab.ranchu 不生效）。
 # ranchu.c 只建了 /firmware/android，没有 fstab 子节点，于是 Android 9/7.1 会报
 # "First stage mount skipped (missing/incompatible fstab in device tree)"，
 # 接着 /system 挂不上、SELinux 策略读不到，直接 reboot。
-# 这里补一个标准 DT fstab：p9/p71 的 SDK 镜像是 GPT 单分区盘，
+# 这里补一个标准 DT fstab：p9 的 SDK 镜像是 GPT 单分区盘，
 # system/vendor 实际是 vda1/vdb1（userdata 是整盘 ext4，vdc）。
+# p71 不使用这个节点：它走 ramdisk 的 fstab.ranchu-noencrypt，
+# 并在 make_guest_image.sh 里改成 vda=system、vdb=data。
 patch_ranchu_dt_fstab() {
     local f="$SRC_DIR/hw/arm/ranchu.c"
     [ -f "$f" ] || { echo "找不到 $f" >&2; return 1; }
-    if grep -q "VMHOST_DT_FSTAB" "$f"; then
+    if grep -q "VMHOST_DT_FSTAB_V6" "$f"; then
         echo "==> ranchu DT fstab 补丁已存在，跳过"
         return 0
     fi
@@ -1227,47 +1375,92 @@ import sys
 
 path = pathlib.Path(sys.argv[1])
 src = path.read_text(encoding="utf-8")
-anchor = '    qemu_fdt_setprop_string(fdt, "/firmware/android", "hardware", "ranchu");\n'
-add = '''    qemu_fdt_setprop_string(fdt, "/firmware/android", "hardware", "ranchu");
+marker = "VMHOST_DT_FSTAB_V6"
+if marker in src:
+    print("    ranchu DT fstab V5 already present")
+    raise SystemExit(0)
 
-    /* VMHOST_DT_FSTAB: Android 9 / 7.1 的 first-stage init 只认设备树 fstab。 */
-    qemu_fdt_add_subnode(fdt, "/firmware/android/fstab");
-    qemu_fdt_setprop_string(fdt, "/firmware/android/fstab",
-                            "compatible", "android,fstab");
+block = '''    /* VMHOST_DT_FSTAB_V6: p9 needs the legacy GPT entries.  The GPT
+       partition labels are "system"/"vendor", so first-stage init must use
+       /dev/block/by-name/* and ranchu must advertise the virtio-mmio platform
+       device names in boot_devices.  p9 is system-as-root: with VMHOST_SAR
+       set, the kernel mounts vda1 at / and init must not mount it again. */
+    {
+        static const char boot_devices[] =
+            "a000000.virtio_mmio,a000200.virtio_mmio,a000400.virtio_mmio,"
+            "a000600.virtio_mmio,a000800.virtio_mmio,a000a00.virtio_mmio,"
+            "a000c00.virtio_mmio,a000e00.virtio_mmio,a001000.virtio_mmio,"
+            "a001200.virtio_mmio,a001400.virtio_mmio,a001600.virtio_mmio,"
+            "a001800.virtio_mmio,a001a00.virtio_mmio,a001c00.virtio_mmio,"
+            "a001e00.virtio_mmio,a002000.virtio_mmio,a002200.virtio_mmio,"
+            "a002400.virtio_mmio,a002600.virtio_mmio,a002800.virtio_mmio,"
+            "a002a00.virtio_mmio,a002c00.virtio_mmio,a002e00.virtio_mmio,"
+            "a003000.virtio_mmio,a003200.virtio_mmio,a003400.virtio_mmio,"
+            "a003600.virtio_mmio,a003800.virtio_mmio,a003a00.virtio_mmio,"
+            "a003c00.virtio_mmio,a003e00.virtio_mmio";
+        qemu_fdt_setprop_string(fdt, "/firmware/android", "boot_devices",
+                                boot_devices);
+    }
 
-    qemu_fdt_add_subnode(fdt, "/firmware/android/fstab/system");
-    qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/system",
-                            "dev", "/dev/block/vda1");
-    qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/system",
-                            "type", "ext4");
-    qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/system",
-                            "mnt_flags", "ro");
-    qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/system",
-                            "fsmgr_flags", "wait");
+    if (g_strcmp0(getenv("VMHOST_DT_FSTAB"), "none") != 0) {
+        qemu_fdt_add_subnode(fdt, "/firmware/android/fstab");
+        qemu_fdt_setprop_string(fdt, "/firmware/android/fstab",
+                                "compatible", "android,fstab");
 
-    qemu_fdt_add_subnode(fdt, "/firmware/android/fstab/vendor");
-    qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/vendor",
-                            "dev", "/dev/block/vdb1");
-    qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/vendor",
-                            "type", "ext4");
-    qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/vendor",
-                            "mnt_flags", "ro");
-    qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/vendor",
-                            "fsmgr_flags", "wait");
+        if (g_strcmp0(getenv("VMHOST_SAR"), "1") != 0) {
+            qemu_fdt_add_subnode(fdt, "/firmware/android/fstab/system");
+            qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/system",
+                                    "dev", "/dev/block/by-name/system");
+            qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/system",
+                                    "type", "ext4");
+            qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/system",
+                                    "mnt_flags", "ro");
+            qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/system",
+                                    "fsmgr_flags", "wait");
+        }
 
-    qemu_fdt_add_subnode(fdt, "/firmware/android/fstab/data");
-    qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/data",
-                            "dev", "/dev/block/vdc");
-    qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/data",
-                            "type", "ext4");
-    qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/data",
-                            "mnt_flags", "noatime,nosuid,nodev,barrier=1");
-    qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/data",
-                            "fsmgr_flags", "wait,check");
+        qemu_fdt_add_subnode(fdt, "/firmware/android/fstab/vendor");
+        qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/vendor",
+                                "dev", "/dev/block/by-name/vendor");
+        qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/vendor",
+                                "type", "ext4");
+        qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/vendor",
+                                "mnt_flags", "ro");
+        qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/vendor",
+                                "fsmgr_flags", "wait");
+
+        /* SAR 的 /data 由 vendor fstab 在第二段 init 挂载。若第一段先挂，
+           mount_all 会再次尝试同一个 mount point，实测 EBUSY 并中断 fs 动作。 */
+        if (g_strcmp0(getenv("VMHOST_SAR"), "1") != 0) {
+            qemu_fdt_add_subnode(fdt, "/firmware/android/fstab/data");
+            qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/data",
+                                    "dev", "/dev/block/vdc");
+            qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/data",
+                                    "type", "ext4");
+            qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/data",
+                                    "mnt_flags", "noatime,nosuid,nodev,barrier=1");
+            qemu_fdt_setprop_string(fdt, "/firmware/android/fstab/data",
+                                    "fsmgr_flags", "wait,check,formattable");
+        }
+    }
 '''
-if anchor not in src:
-    raise SystemExit("ranchu.c hardware 锚点未找到")
-src = src.replace(anchor, add, 1)
+
+legacy_marker = "/* VMHOST_DT_FSTAB"
+tail_anchor = "    if (device_tree_setup_func) {"
+
+legacy_marker_pos = src.find(legacy_marker)
+if legacy_marker_pos >= 0:
+    legacy_start = src.rfind("\n", 0, legacy_marker_pos) + 1
+    legacy_end = src.find(tail_anchor, legacy_start)
+    if legacy_end < 0:
+        raise SystemExit("ranchu.c DT fstab 结束锚点未找到")
+    src = src[:legacy_start] + block + "\n" + src[legacy_end:]
+else:
+    anchor = '    qemu_fdt_setprop_string(fdt, "/firmware/android", "hardware", "ranchu");\n'
+    if anchor not in src:
+        raise SystemExit("ranchu.c hardware 锚点未找到")
+    src = src.replace(anchor, anchor + "\n" + block, 1)
+
 path.write_text(src, encoding="utf-8")
 print("    已修改: hw/arm/ranchu.c")
 PY

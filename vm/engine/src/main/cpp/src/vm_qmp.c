@@ -47,6 +47,7 @@ static pthread_mutex_t s_lock = PTHREAD_MUTEX_INITIALIZER;
 static int       s_fd = -1;
 static bool      s_btn_down;
 static long long s_last_fail_ms = -1;
+static const char *s_touch_button = "touch";
 
 /* 读缓冲：QMP 是行协议，粘包/半包都要处理，所以留一份跨调用的残留缓冲 */
 static char   s_rbuf[4096];
@@ -311,6 +312,14 @@ bool vm_qmp_is_connected(void)
     return ok;
 }
 
+void vm_qmp_set_legacy_touch(bool legacy)
+{
+    pthread_mutex_lock(&s_lock);
+    s_touch_button = legacy ? "left" : "touch";
+    s_btn_down = false;
+    pthread_mutex_unlock(&s_lock);
+}
+
 /*
  * 注入一次触摸。
  *
@@ -328,6 +337,11 @@ bool vm_qmp_is_connected(void)
  *
  * 拖动分支（按住后只补发 abs）同样依赖这一点：位置更新只有在触摸屏语义下
  * 才会被采纳。
+ *
+ * p9/p71 没有 virtio-tablet，QMP 事件落到 goldfish-events 的 legacy absolute
+ * mouse handler；该 handler 只看 buttons_state 的 bit0，所以
+ * vm_qmp_set_legacy_touch(true) 会把按钮名切回 "left"。这两条路径互斥，
+ * p11/p13 仍然必须用 "touch"。
  */
 void vm_qmp_touch(int x, int y, int max_x, int max_y, bool down)
 {
@@ -382,7 +396,8 @@ void vm_qmp_touch(int x, int y, int max_x, int max_y, bool down)
         }
         snprintf(cmd, sizeof(cmd),
                  "{\"execute\":\"input-send-event\",\"arguments\":{\"events\":["
-                 "{\"type\":\"btn\",\"data\":{\"button\":\"touch\",\"down\":false}}]}}");
+                 "{\"type\":\"btn\",\"data\":{\"button\":\"%s\",\"down\":false}}]}}",
+                 s_touch_button);
         ok = command_locked(cmd);
         s_btn_down = false;
     } else if (!s_btn_down) {
@@ -397,11 +412,11 @@ void vm_qmp_touch(int x, int y, int max_x, int max_y, bool down)
         s_last_move_ms = now_ms();
         snprintf(cmd, sizeof(cmd),
                  "{\"execute\":\"input-send-event\",\"arguments\":{\"events\":["
-                 "{\"type\":\"btn\",\"data\":{\"button\":\"touch\",\"down\":false}},"
+                 "{\"type\":\"btn\",\"data\":{\"button\":\"%s\",\"down\":false}},"
                  "{\"type\":\"abs\",\"data\":{\"axis\":\"x\",\"value\":%d}},"
                  "{\"type\":\"abs\",\"data\":{\"axis\":\"y\",\"value\":%d}},"
-                 "{\"type\":\"btn\",\"data\":{\"button\":\"touch\",\"down\":true}}]}}",
-                 ax, ay);
+                 "{\"type\":\"btn\",\"data\":{\"button\":\"%s\",\"down\":true}}]}}",
+                 s_touch_button, ax, ay, s_touch_button);
         ok = command_locked(cmd);
         if (ok) {
             s_btn_down = true;

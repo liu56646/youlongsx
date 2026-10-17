@@ -41,6 +41,24 @@ class VmDiskStore(private val context: Context) {
     /** 快照用的 vmstate 盘（qcow2）。见 [ensureVmstate]。 */
     fun vmstateImage(vmId: Int): File = File(vmDir(vmId), "vmstate.qcow2")
 
+    /** Android 9 FDE 的加密 footer/key 盘（每个实例一份，绝不能跨实例共享）。 */
+    fun encryptionKeyImage(vmId: Int): File = File(vmDir(vmId), "encryptionkey.img")
+
+    /**
+     * 确保实例有独立的 encryptionkey 盘。
+     *
+     * p11/p13/p71 没有这个模板，返回 null 即可（它们的 fstab 不需要）。
+     * p9 的 vendor fstab 是 `forceencrypt=/dev/block/vdd`，首次启动会把
+     * crypto footer 写进这块盘，因此必须每个实例一份。
+     */
+    fun ensureEncryptionKey(vmId: Int, template: File?): File? {
+        val dst = encryptionKeyImage(vmId)
+        if (dst.exists()) return dst
+        if (template == null || !template.isFile || template.length() == 0L) return null
+        template.copyTo(dst, overwrite = true)
+        return dst
+    }
+
     /**
      * 确保实例有快照用的 **qcow2** vmstate 盘。
      *
@@ -104,6 +122,10 @@ class VmDiskStore(private val context: Context) {
         profile: VmDeviceProfile?
     ): Boolean {
         if (profile == null) return true
+        // 缺任一模板都无法完成身份改写。提前返回，避免先复制几百 MB 的
+        // system.img 再失败（p71/p9 的镜像包就没有 product.img）。
+        if (baseProduct == null || !baseProduct.isFile || baseProduct.length() == 0L) return false
+        if (baseSystem == null || !baseSystem.isFile || baseSystem.length() == 0L) return false
         val okProduct = ensureIdentityImage(productImage(vmId), baseProduct, profile)
         val okSystem = ensureIdentityImage(systemImage(vmId), baseSystem, profile)
         return okProduct && okSystem

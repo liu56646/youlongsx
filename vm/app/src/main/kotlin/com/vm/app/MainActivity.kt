@@ -119,7 +119,14 @@ class MainActivity : AppCompatActivity() {
         VmBackend.ACTIVE = resolveBackend()
 
         // 供自动化 / 远程验证使用：带对应 extra 启动即自动执行
-        if (intent?.getBooleanExtra(EXTRA_AUTO_PROBE, false) == true) {
+        if (intent?.getBooleanExtra(EXTRA_AUTO_CREATE_VM, false) == true) {
+            val tag = intent.getStringExtra(EXTRA_AUTO_IMAGE_TAG)
+                ?: VmConstants.DEFAULT_IMAGE_TAG
+            val image = VmGuestCatalog.byTag(tag) ?: VmGuestCatalog.default
+            val profile = intent.getStringExtra(EXTRA_AUTO_DEVICE_PROFILE)
+                ?.takeIf { it.isNotBlank() }
+            binding.root.post { createVmWithImage(image, profile) }
+        } else if (intent?.getBooleanExtra(EXTRA_AUTO_PROBE, false) == true) {
             binding.root.post { probeBackends() }
         } else if (intent?.getBooleanExtra(EXTRA_AUTO_START_VM, false) == true) {
             // 自动化路径直接建/启动，跳过首次引导弹窗（它是模态的，会卡住无头测试）。
@@ -384,6 +391,11 @@ class MainActivity : AppCompatActivity() {
 
     /** 第二步：选模拟机型（写进实例自己那份 product.img 的设备身份）。 */
     private fun pickDevice(image: VmGuestImage) {
+        // p71/p9 等不带 product.img 的镜像做不了身份改写，直接用出厂身份。
+        if (!image.supportsDeviceProfile) {
+            createVmWithImage(image, null)
+            return
+        }
         val profiles = VmDeviceCatalog.ALL
         val labels = ArrayList<String>(profiles.size + 1)
         labels.add(getString(R.string.device_default_fmt, VmDeviceCatalog.default.displayName))
@@ -685,6 +697,15 @@ class MainActivity : AppCompatActivity() {
 
         /** 启动时附带该 extra=true，则自动执行「一键启动」（自动化验证用）。 */
         const val EXTRA_AUTO_START_VM = "com.vm.app.extra.AUTO_START_VM"
+
+        /** 启动时附带该 extra=true，则自动创建一个实例（自动化验证用）。 */
+        const val EXTRA_AUTO_CREATE_VM = "com.vm.app.extra.AUTO_CREATE_VM"
+
+        /** 配合 [EXTRA_AUTO_CREATE_VM] 指定镜像 tag。 */
+        const val EXTRA_AUTO_IMAGE_TAG = "com.vm.app.extra.AUTO_IMAGE_TAG"
+
+        /** 配合 [EXTRA_AUTO_CREATE_VM] 指定机型 id。 */
+        const val EXTRA_AUTO_DEVICE_PROFILE = "com.vm.app.extra.AUTO_DEVICE_PROFILE"
 
         /** 启动时附带该 extra=true，则自动执行一次「检查更新」（自动化验证用）。 */
         const val EXTRA_AUTO_CHECK_UPDATE = "com.vm.app.extra.AUTO_CHECK_UPDATE"

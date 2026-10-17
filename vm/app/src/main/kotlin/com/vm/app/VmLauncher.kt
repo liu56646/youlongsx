@@ -57,6 +57,12 @@ object VmLauncher {
         if (!diskStore.ensureVmstate(info.vmId)) {
             Log.w(TAG, "vmstate.qcow2 准备失败，本次快照保存会失败（冷启动不受影响）")
         }
+        // 旧实例可能是在 p9 镜像还没有 encryptionkey.img 时创建的；
+        // 启动前补一份实例级副本（其他版本没有模板，返回 null）。
+        diskStore.ensureEncryptionKey(
+            info.vmId,
+            imageProvider.encryptionKeyTemplate(info.imageTag)
+        )
 
         // 按宿主能力自适应：低配设备下调 guest 内存与 vCPU 数，
         // 避免 -m 超出宿主可用内存被 OOM，或 -smp 超过物理核导致过度调度。
