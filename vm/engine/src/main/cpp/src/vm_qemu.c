@@ -1065,6 +1065,15 @@ static int spawn_qemu_child(const VmQemuParams *p, const char *exe_path, const c
                 setenv("VMHOSTPIPE_SVC", "1", 1);
             }
         }
+        /* 块设备传输方式：默认 MMIO（virtio-blk-device），p9/p71 的 4.4 内核
+           在 ranchu 上需要 PCI 才能枚举到盘。 */
+        {
+            char v[PROP_VALUE_MAX] = {0};
+            if (__system_property_get("debug.vmhost.blk_pci", v) > 0 &&
+                v[0] == '1') {
+                setenv("VMHOST_BLK_PCI", "1", 1);
+            }
+        }
         /* 逐包/逐次的宿主诊断同样默认关闭 —— 它们比 pipe 日志更凶：
            VMHOST_GLES1_OP 是"每个 GLES 包一行"、VMHOST_GLES2_LOWFREQ 是所谓
            "低频"调用（实测 2.5 分钟 21 万行），VMHOST_MUTEXDBG 每条 mutex 析构
