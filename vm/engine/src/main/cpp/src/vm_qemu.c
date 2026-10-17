@@ -702,7 +702,10 @@ static void *vm_provision_thread(void *raw) {
         free(a);
         return NULL;
     }
-    sleep(5);                                  /* 让 SystemUI / launcher 起稳 */
+    /* boot_completed 只是 SystemServer 报完成，SystemUI/launcher 往往还要几十秒
+       才把首屏画出来（TCG 下更久）。太早发 am start HOME 会打断首启流程，
+       实测会出现一直停在 "Phone is starting…"。给 30 秒缓冲。 */
+    sleep(30);
     bool ok = false;
     for (int attempt = 0; attempt < 8 && !ok; attempt++) {
         ok = prov_send_commands(a->sock);
