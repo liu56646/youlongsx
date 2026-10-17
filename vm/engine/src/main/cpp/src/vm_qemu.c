@@ -882,6 +882,10 @@ static int spawn_qemu_child(const VmQemuParams *p, const char *exe_path, const c
     s_child_mode = true;
     s_restoring = false;   /* 只有在下面真的挂上 -incoming 时才置位 */
     add_arg("%s", "qemu-system-aarch64");
+    /* libsigfix 按 CPU 0/TCG 名称给启动 vCPU 绑大核；其余线程可并行运行。
+       这也让真机 top -H 能区分 vCPU、I/O 和渲染线程。 */
+    add_arg("%s", "-name");
+    add_arg("%s", "vmhost,debug-threads=on");
     if (want_kvm) {
         LOGI("kvm: 使用 KVM 加速（-accel kvm -cpu host）");
         add_arg("%s", "-accel");
@@ -1238,6 +1242,15 @@ static int spawn_qemu_child(const VmQemuParams *p, const char *exe_path, const c
         }
         /* AOSP QEMU 依赖同目录的 glib/pixman/... ，必须显式给库搜索路径 */
         setenv("LD_LIBRARY_PATH", lib_dir, 1);
+        /* 旧 gfxstream 默认逐条输出 fine 日志；正常启动关闭，排障显式开启。 */
+        {
+            char value[PROP_VALUE_MAX] = {0};
+            __system_property_get("debug.vmhost.gfx_debug", value);
+            setenv("VMHOST_GFX_DEBUG", strcmp(value, "1") == 0 ? "1" : "0", 1);
+            value[0] = '\0';
+            __system_property_get("debug.vmhost.pin_mode", value);
+            setenv("VMHOST_PIN_MODE", strcmp(value, "legacy") == 0 ? "legacy" : "balanced", 1);
+        }
         /* 访客显示分辨率：gfxstream glue（vmhost_gfx_glue.cpp）从环境变量读，
            未设置时用它自己的编译期默认 720x1280。运行期可调，便于对比不同
            分辨率下的合成开销。 */

@@ -4,7 +4,7 @@
  * 2) pthread_sigmask / sigprocmask：任何线程试图 BLOCK/SETMASK
  *    SIGSEGV/SIGBUS/SIGABRT/SIGILL/SIGFPE 时自动剥离，保证崩溃信号永不屏蔽，
  *    让 vmhost 崩溃处理器能触发（aemu Thread::maskAllSignals 的 sigfillset 也拦得住）。
- * 3) VMHOST_PIN：把 QEMU 进程钉到宿主主频最高的那几个核上（性能，见文件末尾）。
+ * 3) VMHOST_PIN：启动 vCPU 优先大核，其余线程保留可用 CPU（见文件末尾）。
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
@@ -332,23 +332,46 @@ void exit(int code) {
 }
 
 /* ---------------------------------------------------------------------------
- * 3) VMHOST_PIN：把本进程钉到宿主主频最高的那几个核上。
+ * 3) VMHOST_PIN：CPU 0/TCG 优先大核，不限制整个 MTTCG 进程。
  *
  * 为什么放在这个库：引擎 spawn QEMU 时只 LD_PRELOAD 了 libsigfix.so
  * （见 vm/engine/src/main/cpp/src/vm_qemu.c），所以这是唯一"不用重编 APK/引擎"
  * 就能给 QEMU 子进程加启动修正的入口。
  *
- * 为什么要钉：这个 QEMU 是**单线程 TCG**（实测全程只占 ~1 个核，其余 7 个闲置），
- * 访客的启动速度几乎线性跟随宿主**实际主频**。同一镜像同一参数实测（8 Gen 3）：
+ * 启动早期主要由 CPU 0 执行，速度受宿主实际主频影响。早期测量：
  *   不钉核  ：servicemanager 26.0s / zygote 75.8s / surfaceflinger 154.4s
  *   钉到大核：servicemanager 19.0s / zygote 53.4s / surfaceflinger 104.1s  （1.48x）
- * 线程会继承亲和掩码，所以构造函数里设一次即可覆盖 QEMU 全部线程。
+ * 但当前已经启用 MTTCG：给整个进程绑核会让 6 个 vCPU 和渲染/I/O
+ * 全继承 {6,7}，浪费其余核心。默认只在 QEMU 命名 CPU 0/TCG 时绑大核，
+ * 其他命名线程使用启动时的允许集合；引擎必须启用 debug-threads=on。
  *
  * 选择规则：逐核读 cpuN/cpufreq/cpuinfo_max_freq，取主频最高的一组
  * （本机 = cpu6/cpu7 的 4.32GHz）；读不到就不干预。
  * 环境变量 VMHOST_PIN_CPUS=<十六进制掩码> 可手工指定；=0 表示关闭（A/B 用）。
+ * VMHOST_PIN_MODE=legacy 恢复旧的全进程绑核，供同配置 A/B 使用。
  * ------------------------------------------------------------------------- */
 #define VMPIN_MAX_CPU 64
+
+static cpu_set_t vmpin_allowed;
+static cpu_set_t vmpin_fast;
+static int vmpin_balanced;
+
+int pthread_setname_np(pthread_t thread, const char *name) {
+    typedef int (*setname_fn)(pthread_t, const char *);
+    setname_fn real_setname = (setname_fn)dlsym(RTLD_NEXT, "pthread_setname_np");
+    if (!real_setname) return ENOSYS;
+    const int rc = real_setname(thread, name);
+    if (rc == 0 && vmpin_balanced) {
+        const int boot_cpu = strcmp(name, "CPU 0/TCG") == 0 ||
+                             strcmp(name, "ALL CPUs/TCG") == 0;
+        const cpu_set_t *mask = boot_cpu ? &vmpin_fast : &vmpin_allowed;
+        const pid_t tid = pthread_gettid_np(thread);
+        if (tid > 0 && sched_setaffinity(tid, sizeof(*mask), mask) != 0) {
+            fprintf(stderr, "VMHOST_PIN %s affinity failed: %s\n", name, strerror(errno));
+        }
+    }
+    return rc;
+}
 
 static void vmpin_apply(void) {
     const char *env = getenv("VMHOST_PIN_CPUS");
@@ -362,12 +385,7 @@ static void vmpin_apply(void) {
      * 后台 cpuset 里可能根本没有大核 —— 那样直接 sched_setaffinity({6,7}) 会返回
      * EINVAL（实测踩到过）。所以只在"允许集合"里挑，拿不到理想子集就退而求其次。
      */
-    if (sched_getaffinity(0, sizeof(allowed), &allowed) != 0) {
-        CPU_ZERO(&allowed);
-        for (int i = 0; i < VMPIN_MAX_CPU; i++) {
-            CPU_SET(i, &allowed);
-        }
-    }
+    if (sched_getaffinity(0, sizeof(allowed), &allowed) != 0) return;
 
     if (env != NULL) {
         const unsigned long mask = strtoul(env, NULL, 16);
@@ -419,6 +437,16 @@ static void vmpin_apply(void) {
 
     if (CPU_COUNT(&want) == 0) {
         fprintf(stderr, "VMHOST_PIN 允许集合内没有可用核，跳过\n");
+        return;
+    }
+
+    const char *mode = getenv("VMHOST_PIN_MODE");
+    if (env == NULL && (mode == NULL || strcmp(mode, "legacy") != 0)) {
+        vmpin_allowed = allowed;
+        vmpin_fast = want;
+        vmpin_balanced = 1;
+        fprintf(stderr, "VMHOST_PIN balanced: boot vCPU=%d fast cores, other threads=%d allowed cores\n",
+                CPU_COUNT(&want), CPU_COUNT(&allowed));
         return;
     }
 
