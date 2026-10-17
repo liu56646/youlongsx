@@ -606,6 +606,124 @@ static bool kvm_dev_available(void)
     return true;
 }
 
+/* --------------------------------------------------------------- guest 首次 provisioning
+ *
+ * 裁剪过的 system.img 里没有 Setup Wizard：全新 /data 第一次启动时
+ * SurfaceFlinger 只画一个黑屏 + 光标，launcher 永远不起来（实测帧全黑）。
+ * 手动置 device_provisioned=1 + user_setup_complete=1 再 start HOME
+ * 就能直接进桌面（帧平均亮度从 0 变成 150）。这里在首次启动后自动做一次。
+ *
+ * 触发点：console.log 里出现 sys.boot_completed=1（等最多 40 分钟，TCG 冷启动
+ * 可能十几分钟）。命令通过 console.sock（userdebug 的 ttyS0 shell）送进 guest。
+ * 完成后在实例目录写 .guest_provisioned，之后不再执行。
+ */
+typedef struct VmProvisionArgs {
+    char sock[ARG_CAP];
+    char log[ARG_CAP];
+    char marker[ARG_CAP];
+} VmProvisionArgs;
+
+static bool prov_log_has_boot_completed(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (f == NULL) {
+        return false;
+    }
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return false;
+    }
+    const long sz = ftell(f);
+    const long start = sz > 65536 ? sz - 65536 : 0;
+    if (sz < 0 || fseek(f, start, SEEK_SET) != 0) {
+        fclose(f);
+        return false;
+    }
+    char buf[65537];
+    const size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+    return strstr(buf, "sys.boot_completed=1") != NULL;
+}
+
+/* 一个连接内分几次写（tty 输入缓冲很小，一次性写会丢字符）。 */
+static bool prov_send_commands(const char *sock) {
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return false;
+    }
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", sock);
+    if (connect(fd, (struct sockaddr *) &addr, sizeof(addr)) != 0) {
+        close(fd);
+        return false;
+    }
+    static const char *const kCmds[] = {
+        "settings put global device_provisioned 1\n",
+        "settings put secure user_setup_complete 1\n",
+        "am start -a android.intent.action.MAIN -c android.intent.category.HOME\n",
+    };
+    for (size_t i = 0; i < sizeof(kCmds) / sizeof(kCmds[0]); i++) {
+        ssize_t off = 0;
+        const ssize_t len = (ssize_t) strlen(kCmds[i]);
+        while (off < len) {
+            const ssize_t w = write(fd, kCmds[i] + off, (size_t) (len - off));
+            if (w <= 0) {
+                close(fd);
+                return false;
+            }
+            off += w;
+        }
+        usleep(700 * 1000);
+    }
+    close(fd);
+    return true;
+}
+
+static void *vm_provision_thread(void *raw) {
+    VmProvisionArgs *a = (VmProvisionArgs *) raw;
+    if (a == NULL) {
+        return NULL;
+    }
+    if (a->marker[0] != '\0' && file_ok(a->marker)) {
+        free(a);
+        return NULL;
+    }
+    bool booted = false;
+    for (int i = 0; i < 1200; i++) {          /* 2s * 1200 = 40min 上限 */
+        if (prov_log_has_boot_completed(a->log)) {
+            booted = true;
+            break;
+        }
+        usleep(2 * 1000 * 1000);
+    }
+    if (!booted) {
+        free(a);
+        return NULL;
+    }
+    sleep(5);                                  /* 让 SystemUI / launcher 起稳 */
+    bool ok = false;
+    for (int attempt = 0; attempt < 8 && !ok; attempt++) {
+        ok = prov_send_commands(a->sock);
+        if (!ok) {
+            usleep(2 * 1000 * 1000);
+        }
+    }
+    if (ok) {
+        FILE *m = fopen(a->marker, "wb");
+        if (m != NULL) {
+            fputs("1\n", m);
+            fclose(m);
+        }
+        LOGI("guest 首次 provisioning 已写入（device_provisioned / user_setup_complete / HOME）");
+    } else {
+        LOGW("guest provisioning 失败：连不上 %s", a->sock);
+    }
+    free(a);
+    return NULL;
+}
+
 static int spawn_qemu_child(const VmQemuParams *p, const char *exe_path, const char *lib_dir)
 {
     const int mem = (p->memory_mb > 0) ? p->memory_mb : 2048;
@@ -1019,6 +1137,42 @@ static int spawn_qemu_child(const VmQemuParams *p, const char *exe_path, const c
             pthread_detach(th);
         } else {
             LOGE("快照中转线程创建失败");
+        }
+    }
+
+    /* 首次开机 provisioning（全新 /data 没有 Setup Wizard 会黑屏，见上面的注释） */
+    if (p->serial_log_path != NULL) {
+        VmProvisionArgs *prov = (VmProvisionArgs *) calloc(1, sizeof(*prov));
+        if (prov != NULL) {
+            snprintf(prov->log, sizeof(prov->log), "%s", p->serial_log_path);
+            snprintf(prov->sock, sizeof(prov->sock), "%s", p->serial_log_path);
+            char *slash = strrchr(prov->sock, '/');
+            if (slash != NULL) {
+                snprintf(slash + 1,
+                         sizeof(prov->sock) - (size_t) (slash + 1 - prov->sock),
+                         "console.sock");
+            } else {
+                prov->sock[0] = '\0';
+            }
+            prov->marker[0] = '\0';
+            if (s_snap_state_file[0] != '\0') {
+                snprintf(prov->marker, sizeof(prov->marker), "%s", s_snap_state_file);
+                char *ms = strrchr(prov->marker, '/');
+                if (ms != NULL) {
+                    snprintf(ms + 1,
+                             sizeof(prov->marker) - (size_t) (ms + 1 - prov->marker),
+                             ".guest_provisioned");
+                } else {
+                    prov->marker[0] = '\0';
+                }
+            }
+            pthread_t th;
+            if (prov->sock[0] != '\0' && prov->marker[0] != '\0' &&
+                pthread_create(&th, NULL, vm_provision_thread, prov) == 0) {
+                pthread_detach(th);
+            } else {
+                free(prov);
+            }
         }
     }
     return 0;
