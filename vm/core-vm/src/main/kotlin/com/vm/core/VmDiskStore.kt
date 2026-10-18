@@ -172,7 +172,8 @@ class VmDiskStore(private val context: Context) {
         }
 
         // 扩容：ext4 在访客首启时会按块设备大小自动 resize（fstab 里的 resize 标志）
-        RandomAccessFile(file, "rw").use { it.setLength(sizeBytes) }
+        // 外部镜像的数据盘可能大于默认值，绝不能把已有文件系统尾部截断。
+        RandomAccessFile(file, "rw").use { if (it.length() < sizeBytes) it.setLength(sizeBytes) }
         return file
     }
 

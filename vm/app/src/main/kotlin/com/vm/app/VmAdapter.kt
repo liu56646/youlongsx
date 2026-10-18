@@ -6,6 +6,7 @@ import androidx.recyclerview.widget.RecyclerView
 import com.vm.app.databinding.ItemVmBinding
 import com.vm.core.VmGuestCatalog
 import com.vm.core.VmInfo
+import com.vm.core.VmImageProvider
 
 /** 实例列表适配器。 */
 class VmAdapter(
@@ -40,7 +41,10 @@ class VmAdapter(
             binding.vmMeta.text = res.getString(
                 R.string.vm_meta_fmt,
                 info.vmId,
-                VmGuestCatalog.displayNameOf(info.imageTag)
+                if (info.imageTag.startsWith("external_")) {
+                    VmImageProvider(binding.root.context).importedImages()
+                        .firstOrNull { it.tag == info.imageTag }?.displayName ?: "外部 Android"
+                } else VmGuestCatalog.displayNameOf(info.imageTag)
             )
             binding.vmState.text = res.getString(
                 if (VmRuntime.isRunning(info.vmId)) R.string.state_running else R.string.state_stopped

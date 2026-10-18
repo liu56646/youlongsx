@@ -414,6 +414,7 @@ static bool shm_poll(int req_w, int req_h,
 
 void vm_frame_relay_set_dir(const char *dir)
 {
+    __atomic_store_n(&s_last_frame_ms, 0, __ATOMIC_RELEASE);
     if (dir == NULL || dir[0] == '\0') {
         s_dir[0] = '\0';
         shm_close();

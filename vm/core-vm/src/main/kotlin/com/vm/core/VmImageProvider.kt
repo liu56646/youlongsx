@@ -6,7 +6,8 @@ import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
-import java.util.zip.ZipInputStream
+import java.util.Properties
+import java.util.UUID
 
 /**
  * 访客镜像供给。
@@ -25,7 +26,47 @@ class VmImageProvider(private val context: Context) {
 
     fun imagesRoot(): File = File(context.filesDir, "images").apply { mkdirs() }
 
-    fun imageDir(tag: String): File = File(imagesRoot(), tag)
+    fun imageDir(tag: String): File {
+        require(tag.matches(Regex("[A-Za-z0-9_-]{1,80}"))) { "非法镜像标识" }
+        return File(imagesRoot(), tag)
+    }
+
+    @Volatile var lastImportError: String? = null
+        private set
+
+    /** External images have immutable unique tags; never replace a built-in or live image. */
+    fun importExternal(input: java.io.InputStream, name: String): VmGuestImage {
+        val tag = "external_" + UUID.randomUUID().toString().replace("-", "")
+        val stage = File(imagesRoot(), ".$tag-import").apply { check(mkdir()) }
+        try {
+            VmImageArchive.extract(input, stage)
+            val info = VmImageArchive.describe(stage, name)
+            Properties().apply {
+                setProperty("schema", "1")
+                setProperty("arch", "arm64")
+                setProperty("board", "ranchu")
+                setProperty("profile", info.profile)
+                setProperty("api", info.api.toString())
+                setProperty("name", info.name)
+                setProperty("experimental", info.experimental.toString())
+                File(stage, "vmhost-image.properties").outputStream().use { store(it, null) }
+            }
+            check(stage.renameTo(imageDir(tag))) { "无法发布导入的镜像" }
+            return VmGuestImage(tag, info.name, info.api, 0, supportsDeviceProfile = false)
+        } finally {
+            stage.deleteRecursively()
+        }
+    }
+
+    fun importedImages(): List<VmGuestImage> = imagesRoot().listFiles().orEmpty()
+        .filter { it.isDirectory && it.name.startsWith("external_") && isReady(it.name) }
+        .mapNotNull { dir -> runCatching {
+            val p = Properties().apply {
+                File(dir, "vmhost-image.properties").inputStream().use { load(it) }
+            }
+            VmGuestImage(dir.name, p.getProperty("name", dir.name),
+                p.getProperty("api").toInt(), 0, supportsDeviceProfile = false)
+        }.getOrNull() }.sortedBy { it.displayName }
 
     /** 镜像是否已就绪（kernel 与 system.img 均存在且非空）。 */
     fun isReady(tag: String): Boolean {
@@ -160,38 +201,22 @@ class VmImageProvider(private val context: Context) {
      * 507 MB 的文件先拷成临时文件再解压太浪费，直接流式解压）。
      */
     fun importFromStream(zip: java.io.InputStream, tag: String): Boolean {
-        val dir = imageDir(tag).apply { mkdirs() }
+        val dir = imageDir(tag)
+        val stage = File(imagesRoot(), ".import-${UUID.randomUUID()}").apply { check(mkdir()) }
+        lastImportError = null
         return try {
-            unzip(zip, dir)
+            check(!dir.exists() || dir.list().isNullOrEmpty()) { "镜像目录已有内容，请使用独立的外部镜像导入，避免破坏已有实例" }
+            VmImageArchive.extract(zip, stage)
+            check(File(stage, "kernel").length() > 0 && File(stage, "system.img").length() > 0) { "缺少 kernel / system.img" }
+            if (dir.exists()) check(dir.delete())
+            check(stage.renameTo(dir)) { "无法发布导入的镜像" }
             isReady(tag)
         } catch (t: Throwable) {
+            lastImportError = t.message
             Log.e(TAG, "解压失败", t)
             false
-        }
-    }
-
-    private fun unzip(zip: java.io.InputStream, targetDir: File) {
-        val canonicalTarget = targetDir.canonicalPath
-        ZipInputStream(zip.buffered()).use { zis ->
-            var entry = zis.nextEntry
-            while (entry != null) {
-                val outFile = File(targetDir, entry.name)
-                // 防止 zip slip
-                if (!outFile.canonicalPath.startsWith(canonicalTarget)) {
-                    Log.w(TAG, "跳过越界条目：${entry.name}")
-                    zis.closeEntry()
-                    entry = zis.nextEntry
-                    continue
-                }
-                if (entry.isDirectory) {
-                    outFile.mkdirs()
-                } else {
-                    outFile.parentFile?.mkdirs()
-                    FileOutputStream(outFile).use { zis.copyTo(it) }
-                }
-                zis.closeEntry()
-                entry = zis.nextEntry
-            }
+        } finally {
+            stage.deleteRecursively()
         }
     }
 

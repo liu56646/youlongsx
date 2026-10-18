@@ -11,6 +11,7 @@
 #include "android/avd/hw-config.h"   // AndroidHwConfig（settings->hw() 必须返回非空）
 
 #include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -267,10 +268,22 @@ extern "C" int vmhost_snapshot_load(const char* name, char errbuf[512]) {
         errbuf[0] = '\0';
     }
 
+    const auto started = std::chrono::steady_clock::now();
     vmhost_snapshot_initialize_snapshotter();
     const OperationStatus status =
             Snapshotter::get().load(false /* isQuickboot */, name);
     if (status == OperationStatus::Ok) {
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started).count();
+        const auto stats = Snapshotter::get().getLoadStats(name, elapsed);
+        std::fprintf(stderr,
+                     "VMHOSTSNAP load_profile total_ms=%lld ram_ms=%lld "
+                     "ram_bytes=%lld textures_bytes=%lld compressed=%d ondemand=%d\n",
+                     static_cast<long long>(elapsed),
+                     static_cast<long long>(stats.ramDurationMs),
+                     static_cast<long long>(stats.ramSize),
+                     static_cast<long long>(stats.texturesSize),
+                     stats.compressedRam, stats.onDemandRamEnabled);
         return 0;
     }
 

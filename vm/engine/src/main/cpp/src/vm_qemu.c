@@ -556,6 +556,8 @@ static bool snap_qmp_connect(void)
  */
 static void snap_try_save(void)
 {
+    /* guest 已运行后，旧快照已不再对应当前磁盘。保存失败/跳过时不能留旧标记。 */
+    if (s_snap_state_file[0] != '\0') unlink(s_snap_state_file);
     if (s_snap_cmd_missing || s_snap_state_file[0] == '\0' || !snap_enabled()) {
         return;
     }
@@ -564,26 +566,20 @@ static void snap_try_save(void)
         return;
     }
 
-    /* 显示没在工作就别存。
-       实测：在 guest 显示初始化之前（刚 boot_completed、还没 post 过帧）存下来的
-       快照，恢复后 guest 一直不出帧 —— QMP screendump 显示
-       "Guest has not initialized the display (yet)."，frame post 计数停在 2，
-       用户看到的就是黑屏。这里要求最近 10 秒内真的出过帧。 */
+    /* 至少收到一帧才保存。静止桌面可以长时间不重绘，帧的年龄不能代表
+       显示尚未初始化；否则正常退出会跳过保存并失去可恢复的保存点。
+       set_dir 在每次启动时清零时间戳，不会把上一次运行的帧算在内。 */
     {
-        struct timespec ts;
-        clock_gettime(CLOCK_MONOTONIC, &ts);
-        const uint64_t now_ms =
-                (uint64_t) ts.tv_sec * 1000u + (uint64_t) ts.tv_nsec / 1000000u;
         const uint64_t last_frame_ms = vm_frame_relay_last_frame_ms();
-        if (last_frame_ms == 0 || now_ms - last_frame_ms > 10000u) {
-            LOGW("快照：guest 最近 10s 没有出帧（显示可能未初始化），"
+        if (last_frame_ms == 0) {
+            LOGW("快照：guest 尚未出帧，"
                  "跳过保存以免恢复后黑屏");
             return;
         }
     }
 
     /* 1) 先冻住 guest：快照必须落在静止点，磁盘与 RAM 才同点 */
-    if (vm_qmp_request("stop", NULL, NULL, 0, 5000) < 0) {
+    if (vm_qmp_request("stop", NULL, NULL, 0, 5000) != 0) {
         LOGW("快照：QMP stop 未成功，跳过保存");
         return;
     }
@@ -631,10 +627,15 @@ static void *snap_load_thread(void *arg)
        紧接着 write 就失败（EPIPE），一次就放弃会让恢复永远失败。 */
     char out[4096];
     int rc = -1;
-    for (int attempt = 0; attempt < 8; attempt++) {
+    int request_failures = 0;
+    /* socket 在启动中途才就绪。以 50ms 探测，保留约 8s 的连接重试窗口，
+       避免第一次 connect 失败后固定空等 1s。坏请求仍最多重试 8 次。 */
+    for (int attempt = 0; attempt < 160; attempt++) {
         if (!vm_qmp_is_connected()) {
-            if (!snap_qmp_connect()) {
-                usleep(1000 * 1000);
+            char qmp[ARG_CAP];
+            if (!vm_qemu_qmp_path(qmp, sizeof(qmp)) ||
+                !vm_qmp_connect_for_restore(qmp)) {
+                usleep(50 * 1000);
                 continue;
             }
         }
@@ -652,11 +653,14 @@ static void *snap_load_thread(void *arg)
             break;
         }
         vm_qmp_disconnect();
-        usleep(1000 * 1000);
+        if (++request_failures >= 8) break;
+        usleep(50 * 1000);
     }
 
     if (rc == 0) {
         LOGI("已从快照恢复（%s）", VMHOST_SNAP_NAME);
+        /* 在 cont 之前消费标记：异常退出不得把旧 RAM 与已推进的磁盘再次配对。 */
+        unlink(s_snap_state_file);
         /* 恢复成功也要放行 guest。QEMU 是以 -S（暂停）起来的，而
            load_snapshot() 只在「load 之前 VM 已经在跑」时才自己 vm_start()
            （migration/savevm.c 的 saved_vm_running 分支）—— 我们这条路径不满足，
@@ -667,7 +671,7 @@ static void *snap_load_thread(void *arg)
                 usleep(1000 * 1000);
                 continue;
             }
-            if (vm_qmp_request("cont", NULL, NULL, 0, 5000) >= 0) {
+            if (vm_qmp_request("cont", NULL, NULL, 0, 5000) == 0) {
                 LOGI("快照恢复后已放行 guest");
                 break;
             }
@@ -690,7 +694,7 @@ static void *snap_load_thread(void *arg)
             usleep(1000 * 1000);
             continue;
         }
-        if (vm_qmp_request("cont", NULL, NULL, 0, 5000) >= 0) {
+        if (vm_qmp_request("cont", NULL, NULL, 0, 5000) == 0) {
             LOGI("已放行 guest（本次按冷启动继续）");
             break;
         }
@@ -901,8 +905,9 @@ static int spawn_qemu_child(const VmQemuParams *p, const char *exe_path, const c
               config-target.mak 里有 TARGET_SUPPORTS_MTTCG=y），运行时 cpus.c 的
               qemu_tcg_init_vcpu() 会为每个 vCPU 建独立线程 —— `-smp 6` 时可观察
               到 6 条 "CPU n/TCG" 线程，且能抓到两条 vCPU 线程同时忙。
-              注意：boot 前中期 `top -H` 里常只见 1 条 vCPU 线程忙，那是 guest
-              boot 流程天然串行的**负载形状**，不代表 MTTCG 没开。 */
+              注意：线程数不代表 guest 在线核数；还需检查 PSCI 与 guest 的
+              /sys/devices/system/cpu/online。旧 ranchu DT 缺少 TCG PSCI 时
+              Linux 实际只上线 CPU0。 */
         add_arg("%s", "-accel");
         add_arg("%s", "tcg,thread=multi");
     }
@@ -1250,6 +1255,10 @@ static int spawn_qemu_child(const VmQemuParams *p, const char *exe_path, const c
             value[0] = '\0';
             __system_property_get("debug.vmhost.pin_mode", value);
             setenv("VMHOST_PIN_MODE", strcmp(value, "legacy") == 0 ? "legacy" : "balanced", 1);
+            /* 实验开关只影响冷启动 DT；已有快照恢复其保存的 DT。 */
+            value[0] = '\0';
+            __system_property_get("debug.vmhost.tcg_psci", value);
+            setenv("VMHOST_TCG_PSCI", strcmp(value, "1") == 0 ? "1" : "0", 1);
         }
         /* 访客显示分辨率：gfxstream glue（vmhost_gfx_glue.cpp）从环境变量读，
            未设置时用它自己的编译期默认 720x1280。运行期可调，便于对比不同

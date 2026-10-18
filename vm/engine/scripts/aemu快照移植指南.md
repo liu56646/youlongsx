@@ -895,3 +895,390 @@ protobuf 生成头、`lz4.h` —— 那些 snapshot 头会一路拉到 aemu 的 
 **结论**：现在"秒开"是真的可用 —— 恢复 3.7 秒、渲染器状态完整、guest 侧无报错、
 日志不再疯长。诊断开关全部改成 `setprop debug.vmhost.{pipe,gles,mutex}_log 1`
 才打开，默认干净。
+
+## 8.12 完全开机快照复核（2026-10-18，验证进行中）
+
+本节补充 8.10/8.11 的验收条件：仅有 load 返回成功、console 增长以及四类
+GL/pipe 错误为零，不能证明图形恢复可用。还必须检查
+`fail loading a RenderThread`、渲染线程保存超时，以及恢复后的新帧和输入响应。
+
+首次复核沿用设备原有保存点，没有回滚 userdata、覆盖 vmstate 或清理快照。
+完全开机快照 load 耗时 1.8 秒；cont 后 console 继续增长，超过两分钟采样未出现
+GL 空上下文、窗口资源、pipe backend -4、force_close 错误，但出现 **11 条
+`fail loading a RenderThread`**，本次不计为可用恢复。
+证据：`dist/boot-optimization/snap-full-first-load-{console.log,qemu.err,qemu.out}`。
+
+代码复核发现 ASG globalPreSave 与 opengles preSave 都会调用
+`pauseAllPreSave()`。原 `RenderThread::pausePreSnapshot()` 无条件重建 mStream、
+重置状态为 StartSaving；第二次调用可能破坏已经完成或正在保存的状态。
+`build_gfxstream.sh` 增加 `VMHOST_SNAP_PAUSE_ONCE` 补丁：非 Empty 状态直接返回。
+此修改的真机保存耗时及恢复效果尚待后续采样确认。
+
+App 停机改为先执行 `NativeActivity.onDestroy()`，等 native android_main 保存并退出
+后再停止实例前台服务，保持保存期间的服务与 WakeLock。原先先 stopService 的顺序
+存在保存期间被降级的窗口；这与零字节 ram.bin 的历史现象相符，但不能单凭历史
+截断日志断言当时一定由系统回收导致。另外，成功 load 后在 cont 前消费
+snapshot.state，保存跳过或失败时也不保留旧标记，防止下次把旧 RAM 与已经推进的
+磁盘配对。QMP stop/cont 仅在返回 0 时判成功。
+
+本机另有独立的锁屏干扰：实例服务 isForeground=true 时，厂商系统仍可能把
+`/sys/fs/cgroup/apps/uid_10341/pid_<app>/cgroup.events` 置为 `frozen 1`，
+`dumpsys power` 同时显示 `youlong:vm-instance DISABLED`。因此前台服务不能保证
+厂商锁屏策略下仍在执行。测试期间解锁并临时保持接电亮屏；测试结束恢复原设置。
+不修改安全锁，不把临时锁屏显示标志留在交付源码。
+
+09:43 的 App 退出复核发现另一独立缺陷：native 在 2ms 内记录保存成功，
+而同期手工 QMP 保存需要 6.14s。输入注入为 fire-and-forget，同一个 QMP socket
+可能残留其应答；原 vm_qmp_request 把下一条非 event 消息直接当作本次应答，
+因此 stop/save 可以提前返回并让引擎杀掉尚未保存完成的 QEMU。该次错误标记已
+移除，没有尝试加载。修复为同步请求生成唯一字符串 ID，只接收同 ID 回复。
+`vm/engine/tests/test_qmp_protocol.py` 通过 Linux/WSL 编译实际 C 客户端，使用
+本地假 QMP 服务验证遗留输入回复、错误 ID、迟到回复与真正错误的区分。
+
+另补历史证据：系统日志 01:00:55.721 取消实例 FGS 通知，01:00:56.193
+以 SwipeUpClean force-stop 整个包，随后杀掉 :vm1 及 QEMU 子进程。
+原始片段见 `dist/boot-optimization/app-historical-swipe-kill.log`。
+保留 FGS 的修改针对正常退出期间的降级窗口，不承诺能抵抗厂商显式 force-stop。
+
+### 请求 ID 修复后的阶段结果（尚未通过图形验收）
+
+09:59 正常退出：native 收到销毁 09:59:22.683，真正保存完成 09:59:27.433，
+耗时 **4.75s**；QEMU 随后正常退出。轮询记录显示保存期间实例服务一直
+`isForeground=true`。ram.bin 更新为 1,332,395,353 字节、textures.bin 213,548
+字节，vmstate 与 snapshot.pb 均在同一保存时刻更新。重启到新帧 **4.719s**，
+没有 `fail loading a RenderThread` 或逐线程保存超时。
+
+重复保存的计时：renderer preSave pause=0ms/save=38ms，postSave resume=0ms，
+说明原先逐线程 5 秒等待已消除。但恢复后出现纯 GLES 线程反复查询 Vulkan
+ProcessResources 的错误日志。该指针只用于 VkDecoder，修复为只有 m_vkInfo 存在
+才查表。更新后的恢复到新帧 5.344s，当前 QEMU 进程的上述四类 GL/pipe 错误、
+窗口句柄错误、渲染线程加载失败和保存超时均为 0。
+
+**不能据此宣布可用秒开**：冷启动帧含 `Phone is starting...` 文字，恢复帧只有
+活动进度条，文字缺失，仍在调查纹理/显示状态。连续十轮“无黑屏且输入可用”验收
+尚未执行。诊断构建在 SaveableTexture::getTexImage 记录前 64 次纹理读回的
+尺寸、格式及所用读回路径，避免逐帧日志。已从当前磁盘重新冷启动采样，没有
+回滚 userdata 或用 vmstate 模板覆盖保存文件。
+
+注意 App 的 console.log **和 qemu-stderr.log 都是追加写入**。console 按最后一次
+`Linux version` 截取本轮冷启动；stderr 按最后一次 `VMHOST_PIN` 启动边界截取本轮
+QEMU。不能直接统计整个文件，否则会把旧版错误带进新一轮验收结果。
+阶段证据均在 `dist/boot-optimization/app-id-fixed-*`、`app-vk-*` 及
+`texture-read-diagnostic-save.txt`（dist 被 gitignore，不随提交分发）。
+
+### 缺字定位与 GLES 纹理读回（验证进行中）
+
+10:24 从当前磁盘冷启动至 boot_completed 后重新保存，耗时 6.657s（包含
+轮询）；新保存点包含 GL_ALPHA 128×1、1024×1024 纹理。暂停加载耗时
+2.781s，尚未 cont 时最后一帧文字完整；cont 后 5 秒文字消失。证据：
+`texture-fresh-probe.txt`、`probe-before-cont.png`、`probe-after-cont-5s.png`。
+
+本机 GLES 没有 glGetTexImage；SaveableTexture 原实现直接把 Alpha/Luminance
+纹理挂到 FBO 并 glReadPixels。Adreno 真机探针确认这些格式的 FBO 不完整，
+读回报 GL_INVALID_FRAMEBUFFER_OPERATION，RGBA/RGB 则正常。
+新增 `qemu_patches/vmhost_snapshot_texture.h`，在 ES3 宿主上下文中把
+2D、level 0、UNSIGNED_BYTE 的 Alpha/Luminance/Luminance+Alpha 纹理
+采样到 RGBA，再取回原格式分量，并恢复修改的 GL 状态；快照格式不变。
+编译/链接或读回失败时停止保存进程，不发布成功标记。
+
+`tests/test_snapshot_texture.cpp` 直接使用同一 helper 在真机离屏 EGL 上验证：
+7×5 非对齐宽度、逐字节变化的三种输入均完整读回，裁剪/颜色写入状态还原，
+GL error=0，三项 PASS。完整 App 冷启动→保存→恢复字体与十轮回归仍待验证。
+
+构建可重复性补充：此前构建树里的 VMHOST_MIG_ZERO / VMHOST_MIG_ZERO_LOAD
+没有进入仓库脚本。现在由 `qemu_patches/patch_snapshot_mmio.py` 在保存与加载
+两端一致排除无 host 内存的设备地址空间，实际内容仍由图形/地址空间钩子处理。
+已验证干净 QEMU 源码锚点、重复应用幂等，以及对本机既有补丁不产生二次修改。
+
+10:44 的 App 完整开机保存约 6.719s，候选包重启首帧 5.359s；但运行后仍缺字，
+**Alpha 读回修复尚不足以通过图形验收**。解析 TextureSaver 的 LZ4 流后确认
+1024×1024 atlas 含 1398 个非零像素，且保存→恢复→再次保存的原始字节
+SHA256 均为 `14afe17b997cea1baa388c0356bfb1a9cb1f846415f6d51445e46f925f29e5a4`。
+即字体内容现已正确保存/恢复，还需定位绘制程序或上下文状态。新增有界的
+ProgramData 恢复诊断，打印链接结果、源码长度和 uniform 参数，验证进行中。
+此外 GLES translator 的 glFramebufferTexture2D 0x502 / glReadPixels 0x506
+在本轮冷启动也存在，不能把它们误记为加载后才新增；原四类计数不覆盖此类错误。
+
+11:03 在真实桌面（Gallery/F-Droid 图标、名称和 Google 搜索栏均完整）保存，
+正常退出约 7.438s。新增窗口像素恢复探针后，首次 load 在 stale window 的
+ColorBuffer 查找处崩溃，尚未 cont，故磁盘仍对应原保存点；只补回 marker 后重试。
+原因是窗口 33 仍引用已关闭的 ColorBuffer 34，drawCtx/readCtx 均为 0。
+release 版本的 assert 不保护空查找结果。现在显式空指针判断，将此窗口恢复为
+未附加 buffer；窗口像素恢复分支仍需实际绘制验证，不能据此宣布缺字完全解决。
+
+15:38 修复版真实 App 加载桌面首帧 4.641s，桌面文字/图标完整，八项已列错误
+均为 0。但接着十轮测试的第一次 stop 没有保存：原“最近 10 秒必须有新帧”
+判断把静止桌面误认为显示未初始化。改为本次运行至少收到过一帧，并在
+vm_frame_relay_set_dir 中清零时间戳。此次 guest 已经 cont，不能重新配对旧 RAM；
+15:40 起保留当前 userdata/vmstate，重新冷启动建立保存点，未恢复基线或删除快照。
+十轮回归尚未通过，不得以恢复首帧替代完整验收。
+
+最终候选移除未证明必要的窗口像素填充和 VAO 修改，以及 texture/program
+诊断输出；窗口补丁仅保留对已关闭 ColorBuffer 引用的空指针保护。
+ProgramData 已确认链接及 uniform 正常，桌面快照加载时也没有执行像素填充分支，
+因此不将这两项实验作为缺字修复。Alpha 纹理修复仍由三格式逐字节真机测试覆盖。
+
+### 8.13 2026-10-18：最终候选桌面快照十轮真机回归
+
+最终候选构建日志 `gfx-final-build.log`、`qemu-final-build.log`、
+`app-final-build.log`；APK 已安装到 cc96ded5。未重置 userdata、vmstate 或
+snapshots。15:40 的冷启动正常到达 boot_completed，约 16:09 桌面完整出现。
+冷启动本身仍慢；本轮收益来自已开机桌面的 Quickboot。
+
+中途另做一次启动提示界面的保存/恢复：保存 7.562s，前台服务 11 次采样
+全部 isForeground=true，恢复首帧 5.125s，30 秒及超过 2 分钟错误计数为 0。
+但 “Phone is starting…” 文字在 cont 后消失，仅进度条继续刷新；
+字体 atlas 和 223×21 文字缓存内容均非零，清缓存未解决。
+**启动途中快照仍有缺字问题，不能把桌面回归等同于所有阶段图形恢复已修复。**
+
+16:09:54–16:13:39 完成十次真实 App 正常退出保存→进程重启→加载：
+
+| 指标 | 最小 | 中位数 | 最大 |
+| --- | --- | --- | --- |
+| stop 请求到 QEMU 退出、有效 marker 写入 | 4.859s | 5.508s | 8.828s |
+| App 启动请求到新首帧 | 5.078s | 5.422s | 6.172s |
+
+每轮保存期间前台服务共 83 次采样全部保持前台；每轮加载后 console 增长，
+画面尺寸 720×1280，桌面文字/图标完整。第一轮先让桌面静止超过 10 秒，
+已验证不再被旧的帧年龄判断跳过保存。八类错误十轮全部为 0：null ctx、
+process owned resources、window handle not found、backend error -4、
+force_close=1、RenderThread 加载失败、等待超时、not paused (Empty)。
+renderer 保存无 45s 等待，示例 pause=0ms/save=72ms/resume=0ms。
+
+第十轮后用与 App 相同的 QMP tablet 事件点击桌面图标，打开 WebView Browser
+Tester，标题文字正常；再点击 guest Home 返回桌面，文字/图标仍完整。
+证据 `app-final-touch-10s-frame.png`、`app-final-touch-home-frame.png`。
+十轮数据 `app-alpha-ten-results.json`，完整记录 `app-final-ten-run.txt`，
+逐轮截图汇总 `quickboot-cycles-contact.png`。这些证据位于忽略目录
+`dist/boot-optimization/`；测试脚本不恢复任何磁盘基线。
+
+另一次独立恢复 16:15:41 首帧，16:18:02 超过两分钟采样：console 继续增长，
+桌面文字完整，八项计数仍为 0（`app-final-desktop-2min-*`）。随后正常退出保存
+5.485s，留下有效 `snapshot.state`；ram.bin=1,609,490,576、textures.bin=6,289,061、
+vmstate.qcow2=38,207,488 字节，均为 App 属主。最后 force-stop App，无 QEMU 进程，
+清理测试 forward，恢复接电保持亮屏原值 0。下次 App 启动可直接恢复该桌面保存点。
+交付 `dist/boot-optimization/quickboot-release.apk`，SHA256 为
+`8faa89e17bd6c0cf526e02fdfcbcf7aefd075af809eaa73f18b7cd31398e57fd`。
+
+### 8.14 2026-10-18：桌面 Quickboot 第二轮加速
+
+在保留桌面快照与磁盘同点的前提下继续优化；本轮未恢复 userdata 基线，
+未替换 vmstate 模板，也未清理 snapshots。先给 C ABI load 桥接加入
+`VMHOSTSNAP load_profile`，记录总耗时、RAM 耗时、尺寸及压缩/按需标志。
+基线 total=4007ms、RAM=3225ms，RAM 约 1.61GB、未压缩、同步加载。
+
+1. `patch_snapshot_ram_read.py` 在未压缩且无 MemoryAccessWatch 时，将磁盘连续的
+   非零页合并为最多 256 个 iovec 的 preadv。guest 地址可不连续；磁盘有间隙时
+   另起一批。零页检查/清零、压缩、按需路径和文件格式保持原逻辑。
+   `vmhost_snapshot_readv.h` 处理 EINTR、部分读取与 EOF；失败返回加载错误。
+   第一轮约 38.1 万页仅需 6793 次批次读取，load=3383ms、RAM=2779ms。
+   构建时由 `build_aemu_snapshot.sh` 幂等应用补丁并复制 helper，避免仅修改外部源码。
+2. 原启动连接 QMP 失败后固定等待 1 秒，且普通输入连接自身也节流 1 秒。
+   新增恢复专用连接入口，间隔 50ms，连接轮询上限约 8 秒，坏请求最多 8 次；
+   普通输入维持原节流。首次实测 App 请求到首帧 3.593s，再次 3.594s。
+
+验证命令（Linux/WSL）：
+
+```sh
+g++ -std=c++17 -Wall -Wextra -Werror vm/engine/tests/test_snapshot_readv.cpp -o /tmp/vmhost-test-readv
+/tmp/vmhost-test-readv
+python3 vm/engine/tests/test_qmp_protocol.py
+```
+
+读取测试覆盖 256 个不连续目的缓冲、非零文件偏移、逐字节比较、边界哨兵、
+EINTR、部分读取和截断文件。QMP 三项测试覆盖输入遗留回复、超时迟到回复，
+以及恢复连接可在普通输入 1 秒节流结束前成功。
+
+构建日志 `ram-readv-build.log`、`qemu-readv-build.log`、
+`app-readv-fastqmp-build.log`；APK 已安装至 cc96ded5。
+当时交付 `dist/boot-optimization/quickboot-release.apk` SHA256：
+`e1dbbafe43bb771133cf47fa552f5a42755948e1397936eabd55c71545a06988`。
+
+第二轮连续回归在第 7 轮因黑屏主动停止，**尚不能报告十轮通过**。
+前六轮桌面首帧与文字正常；第六轮运行中 guest system_server(518) 消失，
+zygote(275) 收到 SIGKILL，随后 launcher/SystemUI 报 DeadSystemException。
+第七轮 load 返回成功、console 增长、八类图形错误均为 0，但截图全黑，
+说明仅检查 load 成功与图形错误不足以判定可用。证据 `app-fast-ten-run.txt`、
+`app-fast-ten-results.json`、`app-fast-cycle-06-load-console.log`、
+`app-fast-cycle-07-load-frame.png`。原因未定，不能断言与本轮优化无关。
+此时保留正在恢复服务的 guest，未回滚或删除磁盘/快照。
+
+### 8.15 2026-10-18：第七轮黑屏根因与单核冷启动问题
+
+对保存后的 ram.bin 只读检索，获得明确日志：
+
+```text
+Killing 'system_server' (518) to check forward scheduling progress in Z state for '[crash_dump64]' (1232)
+```
+
+这是 guest llkd 因僵尸 crash_dump64 杀其父进程，与 Java Watchdog 是两套机制。
+原 AmController 只覆盖后者。首次 `stop llkd` 失败，init 明确提示找不到该服务；
+调试构建实际服务名为 `llkd-1`（发布构建为 `llkd-0`）。随后 `su 0 stop llkd-1`
+得到 init 发送 SIGKILL 的日志，后续 `getprop init.svc.llkd-1` 确认为 stopped。
+仅设 `llk.enable=false` 不等于停止已经运行的服务。
+官方定义参考 [llkd.rc](https://chromium.googlesource.com/aosp/platform/system/core/+/b738b7d23a4d50a4b0352dc77ff96d356110072e/llkd/llkd.rc)。
+相关证据 `guest-fast-ram-crash-strings.txt`、`guest-fast-ram-scan.txt`、
+`guest-cpu-online.txt`；后者同时确认 guest online CPU 为 `0`。
+
+进一步核对最新冷启动 console（不只是宿主 top）：
+
+```text
+psci: no cpu_on method, not booting CPU1
+... CPU2–CPU5 同样错误 ...
+smp: Brought up 1 node, 1 CPU
+SMP: Total of 1 processors activated.
+```
+
+**此前 -smp 6 与六个 TCG 线程不代表 guest 真的有六核在线。**
+本版 `hw/arm/ranchu.c` 仍保留旧的 `No PSCI for TCG yet` 分支，
+只在 KVM 模式创建 /psci；但 `target/arm/cpu.c` 已明确 TCG 实现 PSCI 0.2。
+`patch_ranchu_psci.py` 为 TCG 也创建 /psci，并与 virt 板一样，在 realize 前
+设置 CPU 的 HVC psci-conduit。KVM 分支保持原实现。
+构建脚本幂等应用，`qemu-psci-build.log`、`app-psci-build.log` 编译通过。
+**六核真正启动和冷启动耗时仍需真机冷启动验证，不能先写性能结论。**
+
+17:59:48 正常停止当前仍处于 Phone is starting 的 guest，9.578s 后成功保存。
+开始将 userdata.img、vmstate.qcow2、snapshots 和 snapshot.state 整组备份至
+`C:\Users\liu\.codex\tmp\vmhost-cc96ded5\pre-psci-20261018.tar`，
+避免冷启动推进磁盘后无法与旧 RAM 配对。此次不是恢复 userdata 基线，
+也没有替换 vmstate 模板。
+
+备份完成并经 tar 目录及 marker 校验：5,998,582,272 字节，SHA256
+`c5cd38162d973eaf9d180ba1ab07a215f1af267be2bd3016f052ad7d37f88306`。
+另外单独保存同点 metadata.img（16,777,216 字节）到同目录
+`pre-psci-metadata.img`，SHA256
+`b5acec3392dffd86233bc4874f2cfb80538f4624333bb49deb83c10b47cdc213`。
+需要回退时必须恢复完整 tar 加 metadata，不能单独恢复 marker 或 userdata。
+
+PSCI 补丁还把 /psci 节点的生成移到 CPU realize 之后；原 create_fdt 在 CPU 对象
+创建前调用，不能在其中直接读取 qemu_get_cpu(0)->psci_version。
+独立无磁盘内核测试 `psci_smoke.sh` 使用 512MB 内存，不挂 vm_1 的任何盘，
+在约 0.15s guest 时间确认 CPU1–5 全部 Booted、Total of 6 processors activated。
+证据 `psci-smoke-console.log`。测试完成用 monitor quit 正常结束。
+
+18:04:49 安装补丁 APK 后开始真实 App 冷启动。仅将旧 snapshot.state 改名为
+snapshot.state.pre-psci，保留完整旧快照文件；旧标记此后不能直接改回，
+因为冷启动会推进磁盘。后续正常退出保存将建立新的同点快照。
+冷启动时间起点保存在 `psci-cold-start.json`。
+
+### 8.16 2026-10-18：Clang 原子操作探测误判
+
+六核冷启动在 zygote 前后严重变慢，并出现 RCU stall。检查实际构建产物发现
+`config-host.h` 同时缺少 CONFIG_ATOMIC64 和 CONFIG_ATOMIC128。`config.log`
+明确记录 Clang 不认识旧探测所用的 `__atomic_load_8`、`__atomic_load_16` 等
+GCC 尺寸后缀写法；这不代表 ARM64 宿主没有这些能力。
+`cputlb.c` 因此不编译对应 helper，客体 64/128 位原子操作回退到 EXCP_ATOMIC，
+`cpu_exec_step_atomic()` 通过 start_exclusive 暂停全部 vCPU 后执行单步。
+
+`patch_atomic_probe.py` 将探测改为编译器通用的 `_n`/无尺寸后缀 builtin。
+构建脚本使用 configure 文件哈希使旧缓存只在需要时重新探测；没有直接强开能力。
+重建后 CONFIG_ATOMIC64、CONFIG_ATOMIC128 均由探测自动启用。
+`test_atomic_probe.c` 在 cc96ded5 原生执行通过：两种宽度均 lock-free，
+4 线程各 10 万次更新结果正确，128 位高低半部 load/store 完整保留。
+构建证据 `qemu-atomic-build.log`、`app-atomic-build.log`。
+
+18:23 左右先通过 QMP stop 暂停当前未到桌面的 guest，再 save default_boot：
+3.656s 成功，query-status 确认 paused，ram.bin=631790933，textures.bin=30047，
+日志 qemu_savevm_state ret=0、on_end done。随后 QMP quit，确认 QEMU 已退出，
+才 force-stop App、安装新 APK、写同点 marker 并恢复。未在保存后 cont，
+因此没有让磁盘推进后重用旧 RAM。证据 `app-pre-atomic-checkpoint.txt`。
+恢复 load_profile total=2680ms，随后 guest 继续执行。
+
+此前约 uptime 947–952s 通过 guest sysfs 下线 CPU2–5，仅剩 0–1；
+换入修正原子操作的新引擎后，约 uptime 1205s 再次上线到 0–5，串口确认。
+这次启动经历中途热插拔和检查点换引擎，**不能当作干净冷启动耗时对比**。
+llkd 在后续 init 阶段又启动过一次；约 uptime 1176s 再次明确 stop llkd-1，
+收到 init 杀进程和 stopped 状态。此项目前只作用于当前 guest 运行/快照，
+尚未改发布镜像的冷启动配置。
+
+补充实测与发布边界：
+
+- 使用自制静态 /init 和 512MB RAM，在 cc96ded5 先后启动两个无磁盘、
+  六核 QEMU；测试期间先正常停止并 force-stop App，未同时运行 App QEMU。
+  四线程各 1000 次 64/128 位并发更新，修复前 530.328ms，修复后 30.898ms，
+  约 17.16 倍；双方结果正确且确认六核激活。包含内核启动的宿主观测分别
+  14.531s / 8.391s。它是专项实验，不能换算为完整 Android 冷启动倍数。
+  两次均通过 guest poweroff 正常退出，未挂 vm_1 的盘。
+  证据 `atomic-bench-results.json`、`atomic-bench-old-console.log`、
+  `atomic-bench-new-console.log`。
+- 新六核 Android 冷启动经过多次热插拔与中途换引擎，性能结论不充分。
+  因此最终 ranchu TCG PSCI 节点为显式实验开关：环境 VMHOST_TCG_PSCI=1，
+  App 对应 `setprop debug.vmhost.tcg_psci 1`；默认 0，保留原冷启动在线单核行为。
+  已有快照仍恢复其保存的 DT 与在线状态；切换开关不会改变快照中的 guest DT。
+  HVC conduit 在 TCG CPU 上保留，以便兼容实验保存的状态。KVM 沿用既有路径。
+- 当前 guest 于 uptime 2070s 左右退回在线单核；停止调试串口回放服务 logcatd
+  （没有停止 logd），并确认 boot_completed=1、llkd-1=stopped。
+  曾对 guest com.android.phone 执行一次 force-stop 排查蜂窝 HAL 等待，没有改包
+  启用状态；未对宿主电话进程操作，也没有修改镜像内容。
+  18:43:54 截图确认真实桌面；随后实际打开 WebView Browser Tester 并返回 Home，
+  18:49:19 桌面状态栏/导航栏/文字完整，八类图形/快照错误全部为 0。
+- 18:50:05 从可用桌面正常 App 退出，10.969s 成功保存，marker 有效。
+  18:51:40 安装最终带实验开关的 APK 后，4.859s 恢复新帧。
+  构建 `qemu-atomic-gated-build.log`、`app-atomic-gated-build.log` 均成功。
+  随后的十次 App 保存/恢复已完成，结果及最终 APK 边界见 §8.17。
+
+### 8.17 2026-10-18：桌面回归完成与最终产物
+
+18:52–18:56，修正原子操作探测、批量读取 RAM、缩短恢复连接等待的版本，
+连续十次正常 App 保存→重启→恢复全部通过。每轮都执行 guest 串口命令，
+检查 console 增长、帧序号、桌面文字及八类图形/快照错误，避免仅以 load
+返回成功判断可用。首帧 4.344–4.797s，中位数 4.4145s；App 停止至 QEMU
+退出 5.531–5.594s，中位数 5.570s（不含退出后的日志拉取）。80 次服务采样
+在保存期间均为 isForeground=true，未再出现原先九次、每次五秒的渲染等待。
+证据 `app-atomic-ten-run.txt`、`app-atomic-ten-results.json`、
+`app-atomic-cycle-*-lifecycle.json`。原先失败的第七轮仍保留在 §8.14，
+此次十轮成功是在停止 guest llkd-1、重新取得可用桌面后的独立回归。
+
+十轮后实际点击 WebView Browser Tester 并返回桌面，截图正常；随后两分钟
+观察中 console 增长 20,875 字节，60s、120s 截图及八类错误检查全部正常。
+证据 `atomic-final-soak.json`、`atomic-final-soak-run.txt`。
+guest 最终健康检查确认 boot_completed=1、llkd-1/logcatd=stopped、online=0；
+com.android.phone 已自行恢复运行，没有禁用包。此处停止调试服务的状态由
+当前 RAM 快照保存，尚未永久修改未来 Android 冷启动的 init 配置。
+
+最终冷启动开关检查发现，通用 ARM `arm_load_dtb` 还会依据 HVC conduit
+补出 /psci，仅控制 ranchu 自己的节点生成不够。补丁增加 modify_dtb 回调，
+在通用修正完成后，TCG 默认路径移除 /psci，显式实验开关为 1 时保留。
+修正后的最终 APK 无磁盘内核测试确认：默认 1 核、实验开启 6 核，原子操作
+结果均正确；前后 userdata、metadata、vmstate、RAM、marker 的大小/mtime
+逐项完全相同。测试未挂载 vm_1 磁盘。证据 `final-cold-smoke-results.json`。
+该测试只证明引擎冷启动分支正确，不代表完整 Android 冷启动已完成性能回归。
+
+这一 DT 回调修正后的最终 APK 又完成五次桌面恢复：19:05/19:07 两次首帧
+6.063s、5.453s；21:44–21:45 三轮连续保存/恢复首帧 5.719s、5.015s、5.750s，
+串口心跳、文字截图及八类错误检查均通过。
+证据 `app-atomic-corrected-final-load-*`、`app-atomic-corrected-verify-load-*`、
+`app-corrected-final-three-run.txt`、`app-corrected-final-three-results.json`。
+最终版不能直接标为“稳定 4.4 秒”：三轮 load_profile 总耗时
+4693/4187/4351ms，其中 RAM 3982/3494/3653ms，RAM 文件约 1.71GB；
+更早十轮中的一个样本为 total=3467ms、RAM=3044ms。
+闲置后还观察到宿主 QEMU VmSwap=1,729,608kB，首次保存耗时 9.781s，
+之后两次为 4.219/5.640s；三轮后 VmSwap=0。
+宿主大核 scaling_max_freq 当时为 1,401,600kHz（约 1.40GHz），
+未更改系统温控或清理其他应用。日志证实读取阶段有波动，不能仅凭这些
+观测认定单一原因，也不能保证每次恢复都低于五秒。
+
+最终 `dist/boot-optimization/quickboot-release.apk` 与设备已安装版本一致，
+SHA256：`b65364086df67478d98a41717162030a6cb288e081ddc322f2d9a399e692dadd`。
+构建日志 `qemu-atomic-final-build.log`、`app-atomic-final-build.log`。
+六核 PSCI 仍为默认关闭的实验功能；完整 Android 冷启动不宣称加速倍数。
+
+21:47:29 从经过点击/返回检查的桌面正常停止，7.641s 完成保存并退出 QEMU。
+最终 marker=vmhost-snapshot-v1，RAM=1,727,837,785、textures=4,893,823、
+vmstate.qcow2=48,955,392 字节，相关文件及 frame.shm 属主均为 App 10341。
+确认无 QEMU/前台服务后才 force-stop App，移除本轮 4444/4446 转发，保留其他
+转发；接电保持亮屏恢复为原值 0。没有恢复 userdata 或覆盖 vmstate 模板。
+证据 `app-corrected-final-handoff-run.txt`、`quickboot-final-stopped-state.txt`。
+
+### 8.18 2026-10-18：外部镜像入口后的快照回归
+
+本轮新增外部镜像独立导入、Android sparse 转换、镜像布局检查和电脑端转换工具，
+详见 `vm/docs/外部安卓镜像导入.md`。没有将外部文件写入 vm_1 的基础镜像或磁盘。
+22:30 安装外部镜像功能的 APK，SHA256
+`e409d2a70d1e10132a62a7ab6d1ae610093c604e9fc09ae4289abff3171acd11`，
+产物为 `dist/external-images/youlong-external-images.apk`；此前 quickboot-release.apk
+作为历史验证产物保留，没有覆盖。新 APK 恢复 vm_1 首帧 5.390s，串口心跳、
+boot_completed 与桌面截图正常，八类错误为 0。22:31:56 正常退出，6.234s 保存成功。
+最终 RAM=1,729,015,570、textures=4,892,572、vmstate=48,955,392 字节，
+marker 有效、属主仍为 10341，QEMU 已退出，接电保持亮屏恢复为 0。
+没有恢复任何旧 userdata/vmstate/marker。证据 `external-image-final-*`。

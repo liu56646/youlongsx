@@ -64,8 +64,13 @@ open class VmNativeActivityBase : NativeActivity() {
     }
 
     override fun onDestroy() {
-        runCatching { stopService(Intent(this, serviceClass())) }
-        super.onDestroy()
+        // NativeActivity 等 android_main 保存快照并退出后才返回。
+        // 保存期间仍须保留前台等级与 WakeLock，否则进程可能被降级或回收。
+        try {
+            super.onDestroy()
+        } finally {
+            runCatching { stopService(Intent(this, serviceClass())) }
+        }
     }
 
     /** 与本实例同进程的前台服务；四个子类各自覆盖。 */
@@ -88,8 +93,8 @@ open class VmNativeActivityBase : NativeActivity() {
  *
  * 存在的唯一目的：让实例进程在访客运行期间保持「前台服务」等级。Android 据此把
  * 进程放进 foreground cpuset（本机 0-7 全核）而不是 background cpuset（0-3），
- * 并且不会把进程冻结/回收 —— QEMU 是 fork 出来的子进程，与父进程同 cgroup，
- * 父进程被冻结它就跟着停。
+ * 降低进程被冻结/回收的概率。部分厂商锁屏策略仍会冻结前台服务；QEMU 是 fork
+ * 出来的子进程，与父进程同 cgroup，父进程被冻结它就跟着停。
  *
  * 顺带持一把 PARTIAL_WAKE_LOCK：屏幕灭掉时 CPU 仍要跑，访客才不会被挂起。
  */

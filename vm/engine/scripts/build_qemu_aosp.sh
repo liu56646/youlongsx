@@ -1161,6 +1161,9 @@ PY
 
 patch_ram_load_skip_unknown
 
+# 固化此前在构建树验证过的 hostless MMIO RAMBlock 保存/恢复处理。
+python3 "$TOOLS_DIR/qemu_patches/patch_snapshot_mmio.py" "$SRC_DIR/migration/ram.c"
+
 # virtio-tablet 缺少 INPUT_PROP_DIRECT → Android 把它当鼠标（只画光标、拖动不滚动）。
 # 补上 PROP_BITS=INPUT_PROP_DIRECT 后 InputReader 按"直连触摸屏"处理，
 # BTN_TOUCH + ABS_X/Y 就是一根手指，tap/滑动都正常。
@@ -1467,6 +1470,8 @@ PY
 }
 
 patch_ranchu_dt_fstab
+python3 "$(dirname "$0")/qemu_patches/patch_ranchu_psci.py" "$SRC_DIR/hw/arm/ranchu.c"
+python3 "$(dirname "$0")/qemu_patches/patch_atomic_probe.py" "$SRC_DIR/configure"
 
 # 诊断插桩：goldfish_pipe 恢复时到底读到什么、哪一步映射失败
 # （跨进程快照恢复时 pipe 的 signalled buffer / open command 要重新映射回宿主
@@ -1669,7 +1674,8 @@ echo "==> 准备最小 virglrenderer.h 桩：$VIRGL_STUB_DIR/virglrenderer.h"
 mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR"
 
-if [ ! -f config-host.mak ]; then
+atomic_probe_hash="$(sha256sum "$SRC_DIR/configure" | cut -d' ' -f1)"
+if [ ! -f config-host.mak ] || [ "$(cat .vmhost-atomic-probe.sha256 2>/dev/null || true)" != "$atomic_probe_hash" ]; then
     echo "==> configure"
     # 用 bash 执行：AOSP 这版 configure 里有 bash 专有语法，dash 会报
     # "test: no: unexpected operator"
@@ -1695,6 +1701,7 @@ if [ ! -f config-host.mak ]; then
         --extra-cflags="-fPIC -fcommon -Wno-error -I$SYSROOT/include" \
         --extra-ldflags="-L$SYSROOT/lib" \
         2>&1 | tail -40
+    printf '%s\n' "$atomic_probe_hash" > .vmhost-atomic-probe.sha256
 else
     echo "==> 已 configure 过，跳过"
 fi

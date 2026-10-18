@@ -8,6 +8,7 @@ import android.graphics.Typeface
 import android.net.Uri
 import android.net.VpnService
 import android.os.Bundle
+import android.provider.OpenableColumns
 import android.text.format.Formatter
 import android.view.View
 import android.widget.EditText
@@ -91,6 +92,11 @@ class MainActivity : AppCompatActivity() {
             importPickedImage(uri)
         }
 
+    private val pickExternalImage =
+        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
+            if (uri != null) importExternalImage(uri)
+        }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
@@ -113,6 +119,16 @@ class MainActivity : AppCompatActivity() {
         // 顶部按钮已移除：网络 / 解压 / 探测 / 更新 / 一键启动全部改为自动
         // （镜像缺失自动下载、每次打开自动探测、启动时自动引导网络授权）。
         binding.fabCreate.setOnClickListener { createVm() }
+        binding.importExternal.setOnClickListener {
+            if (busy.get()) return@setOnClickListener
+            AlertDialog.Builder(this)
+                .setTitle(R.string.import_external_title)
+                .setMessage(R.string.import_external_help)
+                .setPositiveButton(R.string.import_external_pick) { _, _ ->
+                    pickExternalImage.launch(arrayOf("application/zip", "application/octet-stream", "application/x-zip-compressed"))
+                }
+                .setNegativeButton(R.string.action_cancel, null).show()
+        }
 
         // 后端自动选择：本机有什么用哪个（有 KVM 用 KVM，没有用 TCG），
         // 不设手动开关，直接追求本机最佳性能。
@@ -122,7 +138,8 @@ class MainActivity : AppCompatActivity() {
         if (intent?.getBooleanExtra(EXTRA_AUTO_CREATE_VM, false) == true) {
             val tag = intent.getStringExtra(EXTRA_AUTO_IMAGE_TAG)
                 ?: VmConstants.DEFAULT_IMAGE_TAG
-            val image = VmGuestCatalog.byTag(tag) ?: VmGuestCatalog.default
+            val image = (VmGuestCatalog.ALL + imageProvider.importedImages()).firstOrNull { it.tag == tag }
+                ?: VmGuestCatalog.default
             val profile = intent.getStringExtra(EXTRA_AUTO_DEVICE_PROFILE)
                 ?.takeIf { it.isNotBlank() }
             binding.root.post { createVmWithImage(image, profile) }
@@ -286,6 +303,38 @@ class MainActivity : AppCompatActivity() {
         pickLocalImage.launch(arrayOf("*/*"))
     }
 
+    private fun importExternalImage(uri: Uri) {
+        if (!busy.compareAndSet(false, true)) return
+        val name = runCatching {
+            contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
+                if (it.moveToFirst()) it.getString(0).removeSuffix(".zip") else null
+            }
+        }.getOrNull() ?: "外部 Android"
+        val dialog = AlertDialog.Builder(this).setTitle(R.string.import_external_title)
+            .setMessage(R.string.import_external_working).setCancelable(false).show()
+        Thread {
+            val result = runCatching {
+                val input = contentResolver.openInputStream(uri) ?: error("无法读取选择的文件")
+                input.use { imageProvider.importExternal(it, name) }
+            }
+            runOnUiThread {
+                dialog.dismiss()
+                busy.set(false)
+                refresh()
+                result.fold(onSuccess = { image ->
+                    AlertDialog.Builder(this).setTitle(image.displayName)
+                        .setMessage(R.string.import_external_ready)
+                        .setPositiveButton(R.string.action_create) { _, _ -> createVmWithImage(image) }
+                        .setNegativeButton(R.string.action_cancel, null).show()
+                }, onFailure = {
+                    AlertDialog.Builder(this).setTitle(R.string.import_external_failed)
+                        .setMessage(it.message ?: getString(R.string.import_fail))
+                        .setPositiveButton(android.R.string.ok, null).show()
+                })
+            }
+        }.start()
+    }
+
     private fun importPickedImage(uri: Uri) {
         if (!busy.compareAndSet(false, true)) {
             return
@@ -302,7 +351,7 @@ class MainActivity : AppCompatActivity() {
 
             runOnUiThread {
                 busy.set(false)
-                toast(getString(if (ok) R.string.import_ok else R.string.import_fail))
+                toast(if (ok) getString(R.string.import_ok) else imageProvider.lastImportError ?: getString(R.string.import_fail))
                 if (ok) {
                     refresh()
                     pendingAfterImage?.invoke()
@@ -359,7 +408,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun createVm() {
-        val versions = VmGuestCatalog.ALL
+        val versions = VmGuestCatalog.ALL + imageProvider.importedImages()
         if (versions.isEmpty()) {
             toast(getString(R.string.err_no_image, VmConstants.DEFAULT_IMAGE_TAG))
             return
@@ -426,7 +475,10 @@ class MainActivity : AppCompatActivity() {
             .show()
 
         Thread {
-            val info = repository.create(imageTag = image.tag, deviceProfileId = deviceProfileId)
+            val info = repository.create(
+                name = image.displayName.takeIf { image.tag.startsWith("external_") },
+                imageTag = image.tag, deviceProfileId = deviceProfileId
+            )
             // 选了机型却拿不到实例 product/system 镜像，说明复制或改写失败（会回落到默认身份）
             val applied = info != null && (deviceProfileId == null ||
                 (diskStore.productImage(info.vmId).exists() &&

@@ -11,6 +11,9 @@ set -euo pipefail
 
 WORKDIR="${WORKDIR:-/root/vmbuild}"
 SRC_DIR="${SRC_DIR:-$WORKDIR/qemu-aosp/android/android-emu/android/snapshot}"
+PATCH_DIR="$(cd "$(dirname "$0")" && pwd)/qemu_patches"
+python3 "$PATCH_DIR/patch_snapshot_ram_read.py" "$SRC_DIR/RamLoader.cpp"
+cp "$PATCH_DIR/vmhost_snapshot_readv.h" "$SRC_DIR/vmhost_snapshot_readv.h"
 BUILD_DIR="${BUILD_DIR:-$WORKDIR/aemu-snapshot-build-arm64-v8a}"
 
 ABSEIL_DIR="${ABSEIL_DIR:-$WORKDIR/abseil}"

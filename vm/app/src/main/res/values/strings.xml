@@ -87,7 +87,14 @@
     <string name="download_progress">%1$s / %2$s</string>
     <string name="download_fail">镜像下载失败，请检查网络或改用本地导入</string>
     <string name="image_url_missing">未配置镜像下载地址（构建时用 -PguestImageBaseUrl=… 注入），请选择本地镜像包</string>
-    <string name="import_pick_hint">选择镜像包 p11_arm64.zip</string>
+    <string name="import_pick_hint">选择 Android 镜像包（zip）</string>
+    <string name="import_external">导入外部 Android 镜像</string>
+    <string name="import_external_title">外部 Android 镜像</string>
+    <string name="import_external_help">可导入适配 ARM64 虚拟硬件的 ZIP 镜像包，支持子目录和 Android sparse 分区。导入后独立保存，不覆盖现有系统。\n\n手机刷机包的 payload.bin、super.img 或其他虚拟机专用格式需要先用电脑转换并适配；不能仅更改文件名直接运行。</string>
+    <string name="import_external_pick">选择镜像包</string>
+    <string name="import_external_working">正在导入和检查镜像，请保持应用打开…</string>
+    <string name="import_external_failed">无法导入这个镜像</string>
+    <string name="import_external_ready">镜像已独立导入。可以创建实例尝试启动；导入检查不代表这个第三方系统已通过启动验证。</string>
     <string name="import_ok">镜像导入完成</string>
     <string name="import_fail">镜像导入失败</string>
     <string name="no_free_instance">实例数已达上限，请先删除一个</string>

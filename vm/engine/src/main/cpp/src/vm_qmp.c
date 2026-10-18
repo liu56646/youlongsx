@@ -18,9 +18,11 @@
 #include "vm_qmp.h"
 
 #include <android/log.h>
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -52,6 +54,7 @@ static const char *s_touch_button = "touch";
 /* 读缓冲：QMP 是行协议，粘包/半包都要处理，所以留一份跨调用的残留缓冲 */
 static char   s_rbuf[4096];
 static size_t s_rlen;
+static unsigned long long s_request_seq;
 
 static long long now_ms(void)
 {
@@ -185,7 +188,8 @@ static bool command_locked(const char *json)
  *
  * @return 1=拿到应答行；0=超时；-1=连接已断
  */
-static int read_reply_locked(char *out, size_t cap, int timeout_ms)
+static int read_reply_locked(char *out, size_t cap, int timeout_ms,
+                             const char *request_id)
 {
     const long long deadline = now_ms() + timeout_ms;
     for (;;) {
@@ -206,6 +210,20 @@ static int read_reply_locked(char *out, size_t cap, int timeout_ms)
         if (strstr(line, "\"event\"") != NULL) {
             continue;                       /* 异步事件不是应答 */
         }
+        /* 输入命令不等回复，队列里可能还留着它们的 return。
+           只有本次请求的 ID 才能确认 stop/save/load 真正执行完毕。
+           ID 由本模块生成，只含 ASCII 字母、数字和连字符。 */
+        const char *id = strstr(line, "\"id\"");
+        if (id == NULL) continue;
+        id += 4;
+        while (isspace((unsigned char)*id)) id++;
+        if (*id != ':') continue;
+        id++;
+        while (isspace((unsigned char)*id)) id++;
+        if (*id != '"') continue;
+        id++;
+        const size_t id_len = strlen(request_id);
+        if (strncmp(id, request_id, id_len) != 0 || id[id_len] != '"') continue;
         if (out != NULL && cap > 0) {
             snprintf(out, cap, "%s", line);
         }
@@ -223,7 +241,7 @@ static void close_locked(void)
     s_btn_down = false;
 }
 
-bool vm_qmp_connect(const char *sock_path)
+static bool connect_with_interval(const char *sock_path, int retry_interval_ms)
 {
     if (sock_path == NULL || sock_path[0] == '\0') {
         return false;
@@ -237,7 +255,7 @@ bool vm_qmp_connect(const char *sock_path)
     }
 
     const long long now = now_ms();
-    if (s_last_fail_ms >= 0 && now - s_last_fail_ms < RECONNECT_INTERVAL_MS) {
+    if (s_last_fail_ms >= 0 && now - s_last_fail_ms < retry_interval_ms) {
         pthread_mutex_unlock(&s_lock);
         return false;                        /* 失败节流 */
     }
@@ -295,6 +313,16 @@ bool vm_qmp_connect(const char *sock_path)
     LOGI("QMP 已连接：%s（输入注入可用）", sock_path);
     pthread_mutex_unlock(&s_lock);
     return true;
+}
+
+bool vm_qmp_connect(const char *sock_path)
+{
+    return connect_with_interval(sock_path, RECONNECT_INTERVAL_MS);
+}
+
+bool vm_qmp_connect_for_restore(const char *sock_path)
+{
+    return connect_with_interval(sock_path, 50);
 }
 
 void vm_qmp_disconnect(void)
@@ -504,12 +532,16 @@ int vm_qmp_request(const char *command, const char *arguments_json,
         return -1;
     }
 
+    char request_id[64];
+    snprintf(request_id, sizeof(request_id), "vmhost-request-%llu", ++s_request_seq);
     char json[1024];
     if (arguments_json != NULL && arguments_json[0] != '\0') {
         snprintf(json, sizeof(json),
-                 "{\"execute\":\"%s\",\"arguments\":%s}", command, arguments_json);
+                 "{\"execute\":\"%s\",\"arguments\":%s,\"id\":\"%s\"}",
+                 command, arguments_json, request_id);
     } else {
-        snprintf(json, sizeof(json), "{\"execute\":\"%s\"}", command);
+        snprintf(json, sizeof(json), "{\"execute\":\"%s\",\"id\":\"%s\"}",
+                 command, request_id);
     }
 
     int rc = -1;
@@ -518,7 +550,7 @@ int vm_qmp_request(const char *command, const char *arguments_json,
         close_locked();
     } else {
         char line[4096];
-        const int r = read_reply_locked(line, sizeof(line), timeout_ms);
+        const int r = read_reply_locked(line, sizeof(line), timeout_ms, request_id);
         if (r == 1) {
             if (reply_out != NULL && reply_cap > 0) {
                 snprintf(reply_out, reply_cap, "%s", line);

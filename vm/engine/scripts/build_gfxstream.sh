@@ -246,6 +246,67 @@ VMHOST_PY
         || { echo "!! RenderThread 快照补丁未生效" >&2; exit 1; }
 fi
 
+# ASG globalPreSave 与 opengles preSave 都会暂停同一线程。
+# 第二次暂停不能把 Finished/InProgress 重置为 StartSaving 并清空 mStream；
+# 渲染线程此时已经在等 resume，会造成逐线程 5s 超时和恢复后线程丢失。
+python3 - "$SRC_DIR/host/RenderThread.cpp" <<'VMHOST_PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+s = p.read_text()
+if 'VMHOST_SNAP_PAUSE_ONCE' not in s:
+    old = '''void RenderThread::pausePreSnapshot() {
+    AutoLock lock(mLock);
+    assert(mState == SnapshotState::Empty);'''
+    new = '''void RenderThread::pausePreSnapshot() {
+    AutoLock lock(mLock);
+    // VMHOST_SNAP_PAUSE_ONCE: two services can pause the same render thread.
+    // Preserve both the completed stream and an in-flight snapshot operation.
+    if (mState != SnapshotState::Empty) return;
+    assert(mState == SnapshotState::Empty);'''
+    if old not in s:
+        sys.exit('RenderThread pausePreSnapshot anchor missing')
+    p.write_text(s.replace(old, new, 1))
+# ProcessResources only feeds VkDecoder. GLES-only threads have no Vulkan
+# resource table after load when VulkanSnapshots is disabled.
+s = p.read_text()
+if 'VMHOST_SNAP_VK_RESOURCES_ONLY' not in s:
+    old = '            if (!processResources && tInfo.m_puid) {'
+    new = '''            // VMHOST_SNAP_VK_RESOURCES_ONLY: GL decoding does not use this table.
+            if (tInfo.m_vkInfo && !processResources && tInfo.m_puid) {'''
+    if old not in s:
+        sys.exit('RenderThread processResources anchor missing')
+    p.write_text(s.replace(old, new, 1))
+VMHOST_PY
+
+# 4b) Android GLES 不能把 Alpha/Luminance 纹理直接挂 FBO 读回。
+#       字体 atlas 因此在恢复后变空；先着色到 RGBA，再提取原格式分量。
+cp "$TOOLS_DIR/qemu_patches/vmhost_snapshot_texture.h" \
+   "$SRC_DIR/host/gl/glestranslator/GLcommon/vmhost_snapshot_texture.h"
+python3 - "$SRC_DIR/host/gl/glestranslator/GLcommon/SaveableTexture.cpp" <<'VMHOST_PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+s = p.read_text()
+if 'VMHOST_SNAP_LEGACY_READ' not in s:
+    s = s.replace('#include <algorithm>', '#include <algorithm>\n#include "vmhost_snapshot_texture.h"')
+    old = '''        if (!shouldUseReadPixels(target, level, format, type)) {'''
+    new = '''        // VMHOST_SNAP_LEGACY_READ: legacy formats are not color-renderable.
+        if (isGles2Gles() && target == GL_TEXTURE_2D && level == 0 &&
+            type == GL_UNSIGNED_BYTE &&
+            (format == GL_ALPHA || format == GL_LUMINANCE || format == GL_LUMINANCE_ALPHA)) {
+            if (!vmhostReadLegacyTexture(gl, globalName, format, width, height, data)) {
+                fprintf(stderr, "VMHOSTSNAP legacy texture read failed\\n");
+                abort(); // Never publish a silently corrupted snapshot.
+            }
+            return;
+        }
+
+        if (!shouldUseReadPixels(target, level, format, type)) {'''
+    if old not in s: sys.exit('SaveableTexture legacy read anchor missing')
+    p.write_text(s.replace(old, new, 1))
+VMHOST_PY
+
+python3 "$TOOLS_DIR/qemu_patches/patch_snapshot_window.py" "$SRC_DIR"
+
 # 4c) 逐包打印的两处宿主诊断默认关掉（`VMHOST_GLES_LOG=1` 才打）。
 #     VMHOST_GLES1_OP（gles1 解码器，**每个包一行**）与 VMHOST_GLES2_LOWFREQ
 #     （gles2 解码器，名字叫"低频"但真实负载下每秒上千条）实测 2.5 分钟就能刷出
@@ -374,8 +435,8 @@ src = src.replace(anchor_load, anchor_load + insert_load, 1)
 anchor_save = "        void preSave(android::base::Stream* stream) override {\n"
 insert_save = """            /* VMHOST_RENDERER_SNAPSHOT: 保存渲染器全局状态。顺序与官方一致：
                先 pauseAllPreSave()（把各渲染线程停在一致点），再写版本号 + 状态。
-               与 ASG 那条 globalPreSave 重复调用是安全的（release 下 assert 关掉，
-               pausePreSnapshot 幂等）；resume 由 postSave -> resumeAll() 负责。 */
+               ASG 也会调用暂停，依靠 VMHOST_SNAP_PAUSE_ONCE 保留已保存的状态；
+               resume 由 postSave -> resumeAll() 负责。 */
             if (const auto& renderer = android_getOpenglesRenderer()) {
                 renderer->pauseAllPreSave();
                 stream->putByte(1);
