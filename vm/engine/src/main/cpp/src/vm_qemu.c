@@ -907,7 +907,8 @@ static int spawn_qemu_child(const VmQemuParams *p, const char *exe_path, const c
               到 6 条 "CPU n/TCG" 线程，且能抓到两条 vCPU 线程同时忙。
               注意：线程数不代表 guest 在线核数；还需检查 PSCI 与 guest 的
               /sys/devices/system/cpu/online。旧 ranchu DT 缺少 TCG PSCI 时
-              Linux 实际只上线 CPU0。 */
+              Linux 实际只上线 CPU0 —— 因此 p11/p13 默认下发 /psci
+              （见下方 VMHOST_TCG_PSCI）。 */
         add_arg("%s", "-accel");
         add_arg("%s", "tcg,thread=multi");
     }
@@ -1255,10 +1256,21 @@ static int spawn_qemu_child(const VmQemuParams *p, const char *exe_path, const c
             value[0] = '\0';
             __system_property_get("debug.vmhost.pin_mode", value);
             setenv("VMHOST_PIN_MODE", strcmp(value, "legacy") == 0 ? "legacy" : "balanced", 1);
-            /* 实验开关只影响冷启动 DT；已有快照恢复其保存的 DT。 */
+            /* TCG PSCI：DT 里有 /psci，访客内核才能拉起 CPU1..N。缺了它
+               `-smp 6` 只有 CPU0 在线，整段开机（PMS 并行扫包、SystemServer
+               线程池、SystemUI/launcher、JIT/GC）都挤在一个 vCPU 上。
+               p11/p13 默认开；p9/p71 的旧内核 + goldfish 路径没跑过 SMP，默认关。
+               `setprop debug.vmhost.tcg_psci 0|1` 可强制覆盖。只影响冷启动 DT，
+               已有快照恢复其保存的 DT 与在线核数。 */
             value[0] = '\0';
             __system_property_get("debug.vmhost.tcg_psci", value);
-            setenv("VMHOST_TCG_PSCI", strcmp(value, "1") == 0 ? "1" : "0", 1);
+            bool tcg_psci = !goldfish_display;
+            if (strcmp(value, "0") == 0) {
+                tcg_psci = false;
+            } else if (strcmp(value, "1") == 0) {
+                tcg_psci = true;
+            }
+            setenv("VMHOST_TCG_PSCI", tcg_psci ? "1" : "0", 1);
         }
         /* 访客显示分辨率：gfxstream glue（vmhost_gfx_glue.cpp）从环境变量读，
            未设置时用它自己的编译期默认 720x1280。运行期可调，便于对比不同

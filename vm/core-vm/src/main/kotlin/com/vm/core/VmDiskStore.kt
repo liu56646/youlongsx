@@ -3,6 +3,7 @@ package com.vm.core
 import android.content.Context
 import java.io.File
 import java.io.RandomAccessFile
+import java.nio.ByteBuffer
 
 /**
  * 实例磁盘管理。
@@ -55,7 +56,7 @@ class VmDiskStore(private val context: Context) {
         val dst = encryptionKeyImage(vmId)
         if (dst.exists()) return dst
         if (template == null || !template.isFile || template.length() == 0L) return null
-        template.copyTo(dst, overwrite = true)
+        copySparse(template, dst)
         return dst
     }
 
@@ -100,7 +101,7 @@ class VmDiskStore(private val context: Context) {
         val dst = metadataImage(vmId)
         if (dst.exists()) return dst
         if (template == null || !template.isFile || template.length() == 0L) return null
-        template.copyTo(dst, overwrite = true)
+        copySparse(template, dst)
         return dst
     }
 
@@ -134,7 +135,7 @@ class VmDiskStore(private val context: Context) {
     private fun ensureIdentityImage(dst: File, base: File?, profile: VmDeviceProfile): Boolean {
         if (base == null || !base.isFile || base.length() == 0L) return false
         if (!dst.exists()) {
-            base.copyTo(dst, overwrite = true)
+            copySparse(base, dst)
             if (!VmDeviceIdentity.applyToImage(dst, profile)) {
                 dst.delete()
                 return false
@@ -168,7 +169,7 @@ class VmDiskStore(private val context: Context) {
         }
 
         if (template != null && template.isFile && template.length() > 0) {
-            template.copyTo(file, overwrite = true)
+            copySparse(template, file)
         }
 
         // 扩容：ext4 在访客首启时会按块设备大小自动 resize（fstab 里的 resize 标志）
@@ -189,5 +190,57 @@ class VmDiskStore(private val context: Context) {
     companion object {
         /** 数据盘大小，4 GiB（稀疏文件，不会立刻占满磁盘）。 */
         const val DEFAULT_USERDATA_SIZE: Long = 4L * 1024 * 1024 * 1024
+
+        /** 稀疏拷贝的块大小：与 ext4 常见块组粒度对齐，足够小以命中空洞。 */
+        private const val SPARSE_BLOCK = 64 * 1024
+
+        /**
+         * 拷贝分区镜像，全零块不写、留成空洞。
+         *
+         * 镜像大多是"已格式化但几乎为空"的 ext4（userdata 模板、p71 的 4GiB 盘），
+         * [File.copyTo] 会把空洞读成零再整块写回闪存：创建实例时多写几个 GB，
+         * 用户全程盯着"准备中"对话框，还白占同样大小的存储。访客读空洞得到的
+         * 同样是零，内容等价。
+         */
+        internal fun copySparse(src: File, dst: File) {
+            dst.delete()
+            RandomAccessFile(src, "r").use { input ->
+                RandomAccessFile(dst, "rw").use { output ->
+                    val inCh = input.channel
+                    val outCh = output.channel
+                    val buf = ByteBuffer.allocateDirect(SPARSE_BLOCK)
+                    var pos = 0L
+                    while (true) {
+                        buf.clear()
+                        val n = inCh.read(buf, pos)
+                        if (n <= 0) break
+                        buf.flip()
+                        if (!isAllZero(buf)) {
+                            var written = 0
+                            while (buf.hasRemaining()) {
+                                written += outCh.write(buf, pos + written)
+                            }
+                        }
+                        pos += n
+                    }
+                    // 末尾的空洞也要算进文件长度
+                    output.setLength(input.length())
+                }
+            }
+        }
+
+        private fun isAllZero(buf: ByteBuffer): Boolean {
+            var i = buf.position()
+            val end = buf.limit()
+            while (i + 8 <= end) {
+                if (buf.getLong(i) != 0L) return false
+                i += 8
+            }
+            while (i < end) {
+                if (buf.get(i) != 0.toByte()) return false
+                i++
+            }
+            return true
+        }
     }
 }
