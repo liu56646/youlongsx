@@ -318,6 +318,56 @@ if debugfs -R "ls /system/etc/init" "$STAGE/system.img" 2>/dev/null | grep -q 'b
     echo "    已移除 bootanim 服务（省去后台动画约 50s 的 CPU 占用）"
 fi
 
+#   e) llkd（Android 10+）：调试版会按 TCG 下的"进度太慢"误判活锁，实测直接
+#      SIGKILL system_server（"Killing 'system_server' to check forward scheduling
+#      progress in Z state for '[crash_dump64]'"），整段开机重来；它同时打开
+#      khungtask。沙箱不需要这个看门狗，移除服务定义。
+if debugfs -R "ls /system/etc/init" "$STAGE/system.img" 2>/dev/null | grep -q 'llkd\.rc'; then
+    debugfs -w -R "rm /system/etc/init/llkd.rc" "$STAGE/system.img" >/dev/null 2>&1 || true
+    echo "    已移除 llkd 服务（避免 TCG 下误杀 system_server）"
+fi
+
+#   f) vendor init.ranchu.rc 的 early-init 补 TCG 用的启动属性（与 build_p13_image.sh 一致）：
+#      - ro.hw_timeout_multiplier=10：ANR/InputDispatcher 等超时整体放大，否则
+#        system_server/SystemUI 在 TCG 下反复 ANR → 被杀重来（实测 launcher 4.4h → ~25min）；
+#      - -Xverify:none：app 进程跳过运行期字节码校验（预编译时已校验过）；
+#      - pm.dexopt.first-boot / boot = extract：首次启动（以及改机型后 fingerprint
+#        变化的那次启动）不做 AOT 编译，只抽取 dex。实测首次启动 UpdatePackagesIfNeeded
+#        单项 179s；AOSP 的 eng 构建也是这个取值（runtime_libart.mk）。之后热点代码交给 JIT；
+#      - 以下四项来自 p11 已验证的 vmhost_amctl_vendor.rc：iorapd 不启动、跳过
+#        SetupWizard、默认无锁屏（KeyguardService 在 TCG 下反复 ANR）、不放开机动画。
+#      p9 的 vendor 是 GPT 包装、在上面单独处理；p71 没有 vendor。
+if [ "$API" -ge 29 ] && [ -f "$STAGE/vendor.img" ]; then
+    debugfs -R "cat /etc/init/hw/init.ranchu.rc" "$STAGE/vendor.img" > "$WORK/init.ranchu.rc" 2>/dev/null || true
+    if [ -s "$WORK/init.ranchu.rc" ] && ! grep -q 'ro.hw_timeout_multiplier' "$WORK/init.ranchu.rc"; then
+        python3 - "$WORK/init.ranchu.rc" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+props = """    setprop ro.hw_timeout_multiplier 10
+    setprop dalvik.vm.extra-opts -Xverify:none
+    setprop pm.dexopt.first-boot extract
+    setprop pm.dexopt.boot extract
+    setprop ro.iorapd.enable false
+    setprop ro.setupwizard.mode DISABLED
+    setprop ro.lockscreen.disable.default true
+    setprop debug.sf.nobootanimation 1
+"""
+if "on early-init\n" not in text:
+    raise SystemExit("vendor init.ranchu.rc 里找不到 on early-init")
+path.write_text(text.replace("on early-init\n", "on early-init\n" + props, 1),
+                encoding="utf-8")
+PY
+        debugfs -w -R "rm /etc/init/hw/init.ranchu.rc" "$STAGE/vendor.img" >/dev/null 2>&1 || true
+        debugfs -w -R "write $WORK/init.ranchu.rc /etc/init/hw/init.ranchu.rc" "$STAGE/vendor.img" >/dev/null
+        debugfs -w -R "sif /etc/init/hw/init.ranchu.rc mode 0100644" "$STAGE/vendor.img" >/dev/null
+        e2fsck -fy "$STAGE/vendor.img" >/dev/null 2>&1 || true
+        echo "    已补 vendor 启动属性（超时放大 / 跳过校验 / 首启只抽取 dex / 免向导锁屏动画）"
+    fi
+fi
+
 REGDB=/lib/firmware/regulatory.db
 if [ ! -f "$REGDB" ] && command -v apt-get >/dev/null 2>&1; then
     apt-get install -y wireless-regdb >/dev/null 2>&1 || true

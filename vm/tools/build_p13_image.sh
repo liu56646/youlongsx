@@ -150,6 +150,15 @@ PY
     fi
 fi
 
+# llkd misreads TCG slowness as a livelock and SIGKILLs system_server
+# (observed on p11: "Killing 'system_server' to check forward scheduling
+# progress"), restarting the whole boot.  It also enables khungtask.
+if debugfs -R "ls /system/etc/init" "$WORK/super/system.img" 2>/dev/null | grep -q 'llkd\.rc'; then
+    echo "==> removing llkd watchdog"
+    debugfs -w -R "rm /system/etc/init/llkd.rc" "$WORK/super/system.img" >/dev/null 2>&1 || true
+    e2fsck -fy "$WORK/super/system.img" >/dev/null 2>&1 || true
+fi
+
 echo "==> patching vendor properties and boot rules"
 cat > "$WORK/fstab.ranchu" <<'EOF'
 # VMHost p13: standalone ext4 partitions, explicit virtio-blk device paths.
