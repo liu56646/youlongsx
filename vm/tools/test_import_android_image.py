@@ -1,7 +1,10 @@
 import io
 import gzip
+import hashlib
 import json
+import os
 from pathlib import Path
+import shutil
 import struct
 import tempfile
 import unittest
@@ -34,6 +37,40 @@ class ImportTests(unittest.TestCase):
     def sparse(self, chunks, blocks=4):
         return (struct.pack("<I4H4I", 0xed26ff3a, 1, 0, 28, 12, 4, blocks, len(chunks), 0) +
                 b"".join(struct.pack("<2H2I", kind, 0, count, 12+len(data)) + data for kind, count, data in chunks))
+
+    def lp_super(self, partitions, size=65536):
+        """partitions: [(name, data-or-None-for-zero-extent, physical offset)] -> raw super bytes."""
+        raw = bytearray(size)
+        geometry = struct.pack("<2I32s3I", 0x616c4467, 52, b"", 4096, 2, 4096)
+        raw[4096:4096 + len(geometry)] = geometry
+        entries, extents = b"", b""
+        for index, (name, data, physical) in enumerate(partitions):
+            entries += struct.pack("<36s4I", name.encode(), 0, index, 1, 0)
+            if data is None:
+                extents += struct.pack("<QIQI", 8, 1, 0, 0)
+            else:
+                extents += struct.pack("<QIQI", len(data) // 512, 0, physical // 512, 0)
+                raw[physical:physical + len(data)] = data
+        tables = entries + extents
+        header = bytearray(struct.pack("<I2HI32sI32s12I", 0x414c5030, 10, 0, 128, b"", len(tables),
+                                       hashlib.sha256(tables).digest(), 0, len(partitions), 52,
+                                       len(entries), len(partitions), 24, len(tables), 0, 48, len(tables), 0, 64))
+        header[12:44] = hashlib.sha256(header).digest()
+        raw[12288:12288 + 128 + len(tables)] = bytes(header) + tables
+        return bytes(raw)
+
+    def sparse_of(self, raw, keep=lambda block: True):
+        """Android sparse (4 KiB blocks): RAW for kept non-zero blocks, DONT_CARE otherwise."""
+        chunks = []
+        for i in range(0, len(raw), 4096):
+            data = raw[i:i + 4096]
+            chunks.append((0xcac1, 1, data) if keep(i // 4096) and data.strip(b"\0") else (0xcac3, 1, b""))
+        return (struct.pack("<I4H4I", 0xed26ff3a, 1, 0, 28, 12, 4096, len(raw) // 4096, len(chunks), 0) +
+                b"".join(struct.pack("<2H2I", kind, 0, count, 12+len(data)) + data for kind, count, data in chunks))
+
+    def super_parts(self):
+        return [("system_a", b"S" * 4096, 32768), ("system_b", b"B" * 4096, 36864),
+                ("vendor_a", b"V" * 8192, 40960), ("product_a", None, 0), ("odm_a", b"O" * 4096, 49152)]
 
     def archive(self, files, name="input.zip"):
         path = self.root / name
@@ -79,6 +116,55 @@ class ImportTests(unittest.TestCase):
             entry.external_attr = 0o120777 << 16
             out.writestr(entry, "/etc/passwd")
         with self.assertRaises(ValueError): image.collect(source, self.root / "out")
+
+    def test_sparse_super_split_without_lpunpack(self):
+        source = self.archive({"images/super.img": self.sparse_of(self.lp_super(self.super_parts()))})
+        target = self.root / "out"
+        with mock.patch.object(image.shutil, "which", return_value=None):
+            image.collect(source, target, "a")
+        self.assertEqual((target / "system.img").read_bytes(), b"S" * 4096)
+        self.assertEqual((target / "vendor.img").read_bytes(), b"V" * 8192)
+        self.assertEqual((target / "product.img").read_bytes(), b"\0" * 4096)
+        self.assertEqual(sorted(p.name for p in target.iterdir()), ["product.img", "system.img", "vendor.img"])
+        image.collect(source, self.root / "slot-b", "b")
+        self.assertEqual((self.root / "slot-b" / "system.img").read_bytes(), b"B" * 4096)
+
+    def test_super_sparse_chunks_in_index_order(self):
+        raw = self.lp_super(self.super_parts())
+        # Chunk 1 holds the metadata; ZIP order must not matter, a gap must be refused.
+        chunks = {"super.img_sparsechunk.1": self.sparse_of(raw, lambda b: b < 9),
+                  "super.img_sparsechunk.0": self.sparse_of(raw, lambda b: False),
+                  "super.img_sparsechunk.2": self.sparse_of(raw, lambda b: b >= 9)}
+        target = self.root / "out"
+        image.collect(self.archive(chunks), target, "a")
+        self.assertEqual((target / "system.img").read_bytes(), b"S" * 4096)
+        self.assertEqual((target / "vendor.img").read_bytes(), b"V" * 8192)
+        del chunks["super.img_sparsechunk.1"]
+        with self.assertRaisesRegex(ValueError, "incomplete"):
+            image.collect(self.archive(chunks, "gap.zip"), self.root / "gap", "a")
+
+    def test_corrupt_super_metadata_refused(self):
+        raw = bytearray(self.lp_super(self.super_parts()))
+        raw[12288 + 128] ^= 1
+        source = self.root / "super.img"
+        source.write_bytes(raw)
+        with self.assertRaisesRegex(ValueError, "checksum"):
+            image.collect(source, self.root / "out", "a")
+
+    def test_pixel_factory_nested_image_zip(self):
+        inner = io.BytesIO()
+        with zipfile.ZipFile(inner, "w") as out:
+            out.writestr("system.img", b"pixel-system")
+            out.writestr("system_other.img", b"ignored")
+        source = self.archive({"blazer/image-blazer-dp11.zip": inner.getvalue(), "blazer/flash-all.sh": b"fastboot"})
+        target = self.root / "out"
+        image.collect(source, target, "a")
+        self.assertEqual(sorted(p.name for p in target.iterdir()), ["system.img"])
+        twice = io.BytesIO()
+        with zipfile.ZipFile(twice, "w") as out:
+            out.writestr("image-again.zip", inner.getvalue())
+        with self.assertRaisesRegex(ValueError, "nested more than one level"):
+            image.collect(self.archive({"image-outer.zip": twice.getvalue()}, "twice.zip"), self.root / "twice")
 
     def test_new_dat_erase_hint_then_lower_new(self):
         dat, listing, target = self.root / "dat", self.root / "transfer", self.root / "raw"
@@ -133,7 +219,9 @@ class ImportTests(unittest.TestCase):
     def test_experimental_replacement_keeps_virtual_vendor_and_clean_data(self):
         base = self.bundle()
         source = self.bundle("phone")
-        with (source / "system.img").open("r+b") as out: out.write(b"phone-system")
+        for name in ("system", "product"):
+            with (source / f"{name}.img").open("r+b") as out: out.write(f"phone-{name}".encode())
+        (source / "system_ext.img").unlink()
         (source / "vendor.img").write_bytes(b"phone-hardware")
         (source / "userdata.img").write_bytes(b"phone-encrypted-data")
         original = {p.name:p.read_bytes() for p in base.iterdir()}
@@ -143,7 +231,10 @@ class ImportTests(unittest.TestCase):
         with zipfile.ZipFile(target) as archive:
             self.assertEqual(archive.read("vendor.img"), original["vendor.img"])
             self.assertEqual(archive.read("userdata.img"), original["userdata.img"])
+            # A partition the source lacks stays the base's.
+            self.assertEqual(archive.read("system_ext.img"), original["system_ext.img"])
             self.assertTrue(archive.read("system.img").startswith(b"phone-system"))
+            self.assertTrue(archive.read("product.img").startswith(b"phone-product"))
         self.assertEqual({p.name:p.read_bytes() for p in base.iterdir()}, original)
 
     def test_base_requires_explicit_experiment(self):
@@ -162,6 +253,33 @@ class ImportTests(unittest.TestCase):
         base = self.bundle()
         (base / "kernel").write_bytes(b"ANDROID!" + b"\0"*4096)
         with self.assertRaisesRegex(ValueError, "ARM64"): image.validate(base, "p11")
+
+    def test_erofs_rebuild_needs_linux_root(self):
+        base = self.bundle()
+        raw = bytearray(4096)
+        raw[1024:1028] = b"\xe2\xe1\xf5\xe0"
+        (base / "system.img").write_bytes(raw)
+        with mock.patch.object(image.sys, "platform", "win32"), \
+                self.assertRaisesRegex(ValueError, "system.img is EROFS.*Linux as root"):
+            image.main(["prepare", str(base), "--profile", "p13", "--output", str(self.root / "out.zip")])
+        self.assertFalse((self.root / "out.zip").exists())
+
+    def test_tree_verification_sees_content_and_hardlinks(self):
+        original = self.root / "a"
+        (original / "bin").mkdir(parents=True)
+        (original / "bin" / "sh").write_bytes(b"x" * 5000)
+        os.link(original / "bin" / "sh", original / "bin" / "toybox")
+        expected, entries, blocks = image.tree(original)
+        self.assertEqual(entries, 4)
+        self.assertEqual(blocks, 2 + 2)  # two directories, one 5000-byte inode
+        copy = self.root / "b"
+        shutil.copytree(original, copy)  # copies the link as a second file
+        self.assertNotEqual(image.tree(copy)[0], expected)
+        (copy / "bin" / "toybox").unlink()
+        os.link(copy / "bin" / "sh", copy / "bin" / "toybox")
+        self.assertEqual(image.tree(copy)[0], expected)
+        (copy / "bin" / "sh").write_bytes(b"y" * 5000)
+        self.assertNotEqual(image.tree(copy)[0], expected)
 
     def test_properties_cannot_inject_board_or_api(self):
         text = image.properties({"name":"中文\nboard=phone\\x😀"})

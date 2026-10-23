@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
 """Inspect/normalize third-party Android images; extraction is not hardware emulation.
 
-Standard library only. Optional installed tools: lpunpack, payload-dumper-go,
-brotli, qemu-img. Never executes programs or flash scripts from a ROM archive.
+Standard library only. Optional installed tools: payload-dumper-go, brotli,
+qemu-img; EROFS partitions need Linux as root with mount and e2fsprogs.
+Never executes programs or flash scripts from a ROM archive.
 """
 import argparse
 import gzip
+import hashlib
 import json
 import lzma
 import os
 from pathlib import Path
+import re
 import shutil
+import stat
 import struct
 import subprocess
+import sys
 import tarfile
 import tempfile
 import zipfile
@@ -41,6 +46,9 @@ def normalized(name, slot):
     parts = name.replace("\\", "/").split("/")
     check(not name.startswith("/") and ":" not in name and ".." not in parts, f"Unsafe archive path: {name}")
     name = parts[-1]
+    # Motorola splits super into sparse chunks; Pixel factory zips nest the images.
+    if re.fullmatch(r"super\.img_sparsechunk\.\d{1,4}", name) or re.fullmatch(r"image-[\w.-]+\.zip", name):
+        return name
     if name in ("kernel-ranchu", "kernel-ranchu-64"):
         return "kernel"
     if name.endswith(("_a.img", "_b.img")):
@@ -57,48 +65,76 @@ def collect(source, dest, slot="a"):
     source, dest = Path(source), Path(dest)
     dest.mkdir(exist_ok=True)
     total = 0
+    chunks = {}
 
-    def add(name, stream):
+    def target_for(name):
+        target = dest / name
+        check(not target.exists(), f"Multiple copies of {name}; select one slot/architecture first")
+        return target
+
+    def add(name, opener, nested=False):
         nonlocal total
         name = normalized(name, slot)
         if name is None:
             return
-        target = dest / name
-        check(not target.exists(), f"Multiple copies of {name}; select one slot/architecture first")
-        with target.open("xb") as out:
-            total += copy_stream(stream, out, LIMIT - total)
+        if name.startswith("super.img_sparsechunk."):
+            index = int(name.rsplit(".", 1)[1])
+            check(index not in chunks, f"Multiple copies of {name}; select one slot/architecture first")
+            chunks[index] = opener
+        elif name == "super.img":
+            total += extract_super([opener], target_for, slot, LIMIT - total)
+        elif name.endswith(".zip"):
+            check(not nested, "Image archives nested more than one level are not accepted")
+            with opener() as stream, zipfile.ZipFile(stream) as inner:
+                add_zip(inner, nested=True)
+        else:
+            with opener() as stream, target_for(name).open("xb") as out:
+                total += copy_stream(stream, out, LIMIT - total)
+
+    def finish_chunks():
+        # Chunks share super's raw offset space and must be read in index order,
+        # while their container is still open.
+        nonlocal total
+        if chunks:
+            check(sorted(chunks) == list(range(len(chunks))), "super.img sparse chunks are incomplete")
+            total += extract_super([chunks[i] for i in sorted(chunks)], target_for, slot, LIMIT - total)
+            chunks.clear()
+
+    def add_zip(archive, nested=False):
+        for info in archive.infolist():
+            check((info.external_attr >> 16) & 0o170000 != 0o120000, "ZIP symlinks are not accepted")
+            if not info.is_dir():
+                # Validate every path, even entries we do not extract.
+                if normalized(info.filename, slot):
+                    add(info.filename, lambda info=info: archive.open(info), nested)
+        finish_chunks()
 
     if source.is_dir():
         for path in source.rglob("*"):
             check(not path.is_symlink(), f"Symlinks are not accepted: {path.name}")
             if path.is_file():
-                with path.open("rb") as stream:
-                    add(path.relative_to(source).as_posix(), stream)
+                add(path.relative_to(source).as_posix(), lambda path=path: path.open("rb"))
+        finish_chunks()
     elif zipfile.is_zipfile(source):
         with zipfile.ZipFile(source) as archive:
-            for info in archive.infolist():
-                check((info.external_attr >> 16) & 0o170000 != 0o120000, "ZIP symlinks are not accepted")
-                if not info.is_dir():
-                    # Validate every path, even entries we do not extract.
-                    name = normalized(info.filename, slot)
-                    if name:
-                        with archive.open(info) as stream:
-                            add(info.filename, stream)
+            add_zip(archive)
     elif source.name.endswith((".img.xz", ".img.gz")):
         opener = lzma.open if source.suffix == ".xz" else gzip.open
-        with opener(source, "rb") as stream:
-            add(source.stem if source.stem in DISKS else "system.img", stream)
+        add(source.stem if source.stem in DISKS else "system.img", lambda: opener(source, "rb"))
+    elif normalized(source.name, slot) and not source.name.endswith(".zip"):
+        # Before the TAR probe: raw super/ext4 images start with zero blocks,
+        # which tarfile accepts as an empty archive.
+        add(source.name, lambda: source.open("rb"))
     elif tarfile.is_tarfile(source):
         with tarfile.open(source, "r:*") as archive:
             for info in archive:
                 normalized(info.name, slot)
                 check(not info.issym() and not info.islnk() and not info.isdev(), "TAR links/devices are not accepted")
                 if info.isfile() and normalized(info.name, slot):
-                    with archive.extractfile(info) as stream:
-                        add(info.name, stream)
+                    add(info.name, lambda info=info: archive.extractfile(info))
+            finish_chunks()
     else:
-        with source.open("rb") as stream:
-            add(source.name if normalized(source.name, slot) else "system.img", stream)
+        add(source.name if normalized(source.name, slot) else "system.img", lambda: source.open("rb"))
     check(any(dest.iterdir()), "No recognized Android image components found")
 
 
@@ -125,50 +161,174 @@ def read_exact(src, n):
     return data
 
 
-def unsparse(source, dest):
-    with Path(source).open("rb") as src, Path(dest).open("xb") as out:
-        magic, major, minor, header, chunk_header, block, blocks, chunks, checksum = struct.unpack("<I4H4I", read_exact(src, 28))
-        check(magic == 0xed26ff3a and major == 1 and header >= 28 and chunk_header >= 12,
-              "Invalid sparse header")
-        check(4 <= block <= 1024**2 and block % 4 == 0 and 0 < blocks <= LIMIT // block and
-              0 < chunks <= 10_000_000, "Invalid sparse dimensions")
-        read_exact(src, header - 28)
-        written = 0
-        for _ in range(chunks):
-            kind, reserved, count, total = struct.unpack("<2H2I", read_exact(src, 12))
-            check(total >= chunk_header and count <= blocks - written // block, "Sparse block overflow")
-            read_exact(src, chunk_header - 12)
-            size, payload = count * block, total - chunk_header
-            if kind == 0xcac1:
-                check(payload == size, "Sparse RAW size mismatch")
+def raw_runs(src):
+    """Yield (offset, data) for the stored runs of a raw or Android sparse stream.
+
+    Holes are skipped; the last item is (total_size, b"")."""
+    head = src.read(28)
+    if head[:4] != b"\x3a\xff\x26\xed":
+        offset = 0
+        while head:
+            yield offset, head
+            offset += len(head)
+            head = src.read(4 * 1024**2)
+        yield offset, b""
+        return
+    check(len(head) == 28, "Truncated Android image")
+    magic, major, minor, header, chunk_header, block, blocks, chunks, checksum = struct.unpack("<I4H4I", head)
+    check(major == 1 and header >= 28 and chunk_header >= 12, "Invalid sparse header")
+    check(4 <= block <= 1024**2 and block % 4 == 0 and 0 < blocks <= LIMIT // block and
+          0 < chunks <= 10_000_000, "Invalid sparse dimensions")
+    read_exact(src, header - 28)
+    written = 0
+    for _ in range(chunks):
+        kind, reserved, count, total = struct.unpack("<2H2I", read_exact(src, 12))
+        check(total >= chunk_header and count <= blocks - written // block, "Sparse block overflow")
+        read_exact(src, chunk_header - 12)
+        size, payload = count * block, total - chunk_header
+        if kind == 0xcac1:
+            check(payload == size, "Sparse RAW size mismatch")
+            remaining = size
+            while remaining:
+                data = read_exact(src, min(remaining, 4 * 1024**2))
+                yield written + size - remaining, data
+                remaining -= len(data)
+        elif kind == 0xcac2:
+            check(payload == 4, "Sparse FILL size mismatch")
+            fill = read_exact(src, 4)
+            if fill != b"\0" * 4:
+                buffer = fill * (256 * 1024)
                 remaining = size
                 while remaining:
-                    data = read_exact(src, min(remaining, 1024**2))
-                    out.write(data)
+                    data = buffer[:min(remaining, len(buffer))]
+                    yield written + size - remaining, data
                     remaining -= len(data)
-            elif kind == 0xcac2:
-                check(payload == 4, "Sparse FILL size mismatch")
-                fill = read_exact(src, 4)
-                if fill == b"\0" * 4:
-                    out.seek(size, 1)
-                else:
-                    buffer = fill * (256 * 1024)
-                    remaining = size
-                    while remaining:
-                        data = buffer[:min(remaining, len(buffer))]
-                        out.write(data)
-                        remaining -= len(data)
-            elif kind == 0xcac3:
-                check(payload == 0, "Sparse DONT_CARE size mismatch")
-                out.seek(size, 1)
-            elif kind == 0xcac4:
-                check(count == 0 and payload == 4, "Sparse CRC block mismatch")
-                read_exact(src, 4)
-            else:
-                raise ValueError(f"Unknown sparse chunk: {kind:x}")
-            written += size
-        check(written == block * blocks and src.read(1) == b"", "Sparse total size mismatch")
-        out.truncate(written)
+        elif kind == 0xcac3:
+            check(payload == 0, "Sparse DONT_CARE size mismatch")
+        elif kind == 0xcac4:
+            check(count == 0 and payload == 4, "Sparse CRC block mismatch")
+            read_exact(src, 4)
+        else:
+            raise ValueError(f"Unknown sparse chunk: {kind:x}")
+        written += size
+    check(written == block * blocks, "Sparse total size mismatch")
+    yield written, b""
+
+
+def unsparse(source, dest):
+    with Path(source).open("rb") as src, Path(dest).open("xb") as out:
+        check(src.read(4) == b"\x3a\xff\x26\xed", "Invalid sparse header")
+        src.seek(0)
+        for offset, data in raw_runs(src):
+            out.seek(offset)
+            out.write(data)
+        check(src.read(1) == b"", "Sparse total size mismatch")
+        out.truncate(offset)
+
+
+def lp_partitions(head, slot):
+    """Read super's primary LP metadata: {name: (size, [(logical, length, physical)])}."""
+    check(len(head) >= 3 * 4096 + 128, "super.img is too small for dynamic-partition metadata")
+    magic, _ = struct.unpack_from("<2I", head, 4096)
+    check(magic == 0x616c4467, "super.img has no dynamic-partition geometry")
+    max_size, slots, block_size = struct.unpack_from("<3I", head, 4096 + 40)
+    check(512 <= max_size <= 1024**2 and max_size % 512 == 0 and 1 <= slots <= 3 and
+          block_size % 512 == 0 and len(head) >= 3 * 4096 + max_size, "Invalid dynamic-partition geometry")
+    base = 3 * 4096
+    magic, major, minor, header_size = struct.unpack_from("<I2HI", head, base)
+    tables_size = struct.unpack_from("<I", head, base + 44)[0]
+    check(magic == 0x414c5030 and major == 10 and 128 <= header_size and
+          header_size + tables_size <= max_size, "Unsupported dynamic-partition metadata")
+    header = bytearray(head[base:base + header_size])
+    header[12:44] = bytes(32)
+    tables = head[base + header_size:base + header_size + tables_size]
+    check(hashlib.sha256(header).digest() == head[base + 12:base + 44] and
+          hashlib.sha256(tables).digest() == head[base + 48:base + 80],
+          "Dynamic-partition metadata checksum mismatch")
+    descriptors = struct.unpack_from("<12I", head, base + 80)
+
+    def table(index, entry_size):
+        offset, count, size = descriptors[index * 3:index * 3 + 3]
+        check(size >= entry_size and offset + count * size <= len(tables), "Corrupt dynamic-partition table")
+        return [tables[offset + i * size:offset + (i + 1) * size] for i in range(count)]
+
+    extents = [struct.unpack_from("<QIQI", entry) for entry in table(1, 24)]
+    partitions = {}
+    for entry in table(0, 52):
+        name = entry[:36].split(b"\0")[0].decode("ascii", "replace")
+        attributes, first, count, group = struct.unpack_from("<4I", entry, 36)
+        check(re.fullmatch(r"[a-z0-9_]{1,36}", name) is not None and first + count <= len(extents),
+              f"Corrupt dynamic-partition entry {name!r}")
+        if name.endswith(("_a", "_b")):
+            if not name.endswith("_" + slot):
+                continue
+            name = name[:-2]
+        logical, runs = 0, []
+        for sectors, kind, physical, device in extents[first:first + count]:
+            check(device == 0 and kind in (0, 1), f"{name}: multi-device or unknown extents are not supported")
+            if kind == 0:
+                runs.append((logical, sectors * 512, physical * 512))
+            logical += sectors * 512
+        check(name not in partitions, f"Duplicate dynamic partition {name}")
+        partitions[name] = (logical, runs)
+    return partitions
+
+
+def extract_super(openers, target_for, slot, budget):
+    """Stream the VM-relevant logical partitions out of super (or its ordered sparse
+    chunks) without writing super itself. Returns the bytes allocated."""
+    head, pending, routes, files = bytearray(), [], None, []
+
+    def start():
+        nonlocal routes
+        routes, allocated = [], 0
+        for name, (size, runs) in sorted(lp_partitions(bytes(head), slot).items()):
+            if name + ".img" not in DISKS or size == 0:
+                continue
+            allocated += size
+            check(allocated <= budget, "Image exceeds the 48 GiB conversion limit")
+            out = target_for(name + ".img").open("xb")
+            files.append(out)
+            out.truncate(size)
+            routes += [(physical, physical + length, out, logical) for logical, length, physical in runs]
+        check(files, f"super.img has no system/vendor/product partitions for slot {slot}")
+        return allocated
+
+    def write(offset, data):
+        end = offset + len(data)
+        for start_at, stop, out, logical in routes:
+            if start_at < end and offset < stop:
+                a, b = max(start_at, offset), min(stop, end)
+                out.seek(logical + a - start_at)
+                out.write(data[a - offset:b - offset])
+
+    allocated = 0
+    try:
+        for opener in openers:
+            with opener() as stream:
+                for offset, data in raw_runs(stream):
+                    if routes is not None:
+                        write(offset, data)
+                        continue
+                    pending.append((offset, data))
+                    if offset >= len(head) and data:
+                        head.extend(bytes(offset - len(head)))
+                        head.extend(data)
+                    if len(head) >= 4096 + 52:
+                        max_size = struct.unpack_from("<I", head, 4096 + 40)[0]
+                        if len(head) >= 3 * 4096 + min(max_size, 1024**2):
+                            allocated = start()
+                            for item in pending:
+                                write(*item)
+                            pending.clear()
+        if routes is None:
+            allocated = start()
+            for item in pending:
+                write(*item)
+    finally:
+        for out in files:
+            out.close()
+    return allocated
 
 
 def tool(name):
@@ -177,8 +337,103 @@ def tool(name):
     return path
 
 
-def run(args, **kwargs):
-    return subprocess.run(args, check=True, timeout=1800, **kwargs)
+def run(args, timeout=1800, **kwargs):
+    return subprocess.run(args, check=True, timeout=timeout, **kwargs)
+
+
+def tree(root):
+    """Describe a mounted partition: ({path: metadata}, entries, 4K blocks an ext4 copy needs).
+
+    Metadata is type, permission bits, owner, rdev, every xattr (SELinux label,
+    capabilities), symlink target, content SHA-256 and hardlink grouping."""
+    root = Path(root)
+    entries, blocks, first = {}, 0, {}
+    listxattr = getattr(os, "listxattr", None)
+    paths = [root]
+    for parent, dirs, files in os.walk(root):  # never follows directory symlinks
+        paths += [Path(parent, name) for name in dirs + files]
+    for path in sorted(paths):
+        rel = path.relative_to(root).as_posix()
+        st = path.lstat()
+        xattrs = {k: os.getxattr(path, k, follow_symlinks=False)
+                  for k in sorted(listxattr(path, follow_symlinks=False))} if listxattr else {}
+        info = [stat.S_IFMT(st.st_mode), stat.S_IMODE(st.st_mode), st.st_uid, st.st_gid, xattrs]
+        # 256-byte inodes hold ~90 bytes of xattrs; the rest needs its own block.
+        blocks += sum(len(k) + len(v) + 16 for k, v in xattrs.items()) > 90
+        if stat.S_ISLNK(st.st_mode):
+            target = os.readlink(path)
+            info.append(target)
+            blocks += len(target) >= 60
+        elif stat.S_ISREG(st.st_mode):
+            digest = hashlib.sha256()
+            with path.open("rb") as src:
+                while data := src.read(1024**2):
+                    digest.update(data)
+            key = (st.st_dev, st.st_ino)
+            info += [st.st_size, digest.hexdigest(), first.setdefault(key, rel) if st.st_nlink > 1 else None]
+            if first.get(key, rel) == rel:
+                blocks += -(-st.st_size // 4096)
+        elif stat.S_ISDIR(st.st_mode):
+            blocks += 1 + len(os.listdir(path)) * 64 // 4096
+        elif stat.S_ISCHR(st.st_mode) or stat.S_ISBLK(st.st_mode):
+            info.append(st.st_rdev)
+        entries[rel] = info
+    return entries, len(paths), blocks
+
+
+def erofs_to_ext4(path):
+    """Rebuild an EROFS partition as ext4 with identical metadata (Linux, root).
+
+    The App, engine and guest fstab mount ext4 only. mke2fs -d copies owner,
+    mode, xattrs and hardlinks straight from a read-only mount (nothing is
+    extracted to disk), and every entry is compared before the copy is used."""
+    check(sys.platform.startswith("linux") and os.geteuid() == 0,
+          f"{path.name} is EROFS; rebuilding it as ext4 needs Linux as root (WSL works)")
+    mke2fs, e2fsck, resize2fs, debugfs = (tool(name) for name in ("mke2fs", "e2fsck", "resize2fs", "debugfs"))
+    print(f"Rebuilding {path.name} from EROFS as ext4 (metadata verified)...", file=sys.stderr)
+    out, source, copy = path.with_suffix(".ext4"), path.with_suffix(".erofs-mnt"), path.with_suffix(".ext4-mnt")
+    source.mkdir()
+    copy.mkdir()
+    run(["mount", "-t", "erofs", "-o", "loop,ro", str(path), str(source)])
+    try:
+        expected, entries, blocks = tree(source)
+        inodes = entries + entries // 20 + 256
+        # Data + 256-byte inode tables + per-group metadata, with slack that
+        # resize2fs -M trims. Features match Android-built ext4 images.
+        total = blocks + blocks // 12 + inodes // 16 + 4096
+        with out.open("xb") as image:
+            image.truncate(total * 4096)
+        run([mke2fs, "-q", "-F", "-b", "4096", "-I", "256", "-N", str(inodes), "-m", "0",
+             "-O", "^resize_inode,extent,huge_file,uninit_bg,dir_nlink,extra_isize",
+             "-E", "root_owner=0:0", "-d", str(source), str(out), str(total)], timeout=4 * 3600)
+        label = expected["."][4].get("security.selinux")
+        if "lost+found" not in expected and label:
+            # Android labels lost+found like the partition root.
+            value = path.with_suffix(".label")
+            check('"' not in str(value), f"Unsupported character in work path: {value}")
+            value.write_bytes(label)
+            run([debugfs, "-w", "-R", f'ea_set -f "{value}" /lost+found security.selinux', str(out)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            value.unlink()
+        run([e2fsck, "-fn", str(out)], stdout=subprocess.DEVNULL)
+        run([resize2fs, "-M", str(out)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        run([e2fsck, "-fn", str(out)], stdout=subprocess.DEVNULL)
+        run(["mount", "-t", "ext4", "-o", "loop,ro", str(out), str(copy)])
+        try:
+            actual = tree(copy)[0]
+        finally:
+            run(["umount", str(copy)])
+        # mke2fs always adds lost+found; Android-built images carry one too.
+        if "lost+found" not in expected:
+            added = actual.pop("lost+found", None)
+            check(not label or added and added[4].get("security.selinux") == label,
+                  f"{path.name}: lost+found did not get the root SELinux label")
+        check(actual == expected, f"{path.name}: ext4 rebuild differs from the EROFS original")
+    finally:
+        run(["umount", str(source)])
+        source.rmdir()
+        copy.rmdir()
+    out.replace(path)
 
 
 def dat_image(data, transfers, target):
@@ -245,15 +500,11 @@ def convert_components(root, slot):
             raw = path.with_suffix(".raw")
             run([qemu, "convert", "-f", "qcow2", "-O", "raw", str(path), str(raw)])
             raw.replace(path)
+    # super.img is split into logical partitions by collect() itself.
     extracted = root / "extracted"
     if (root / "payload.bin").exists():
-        check(not (root / "super.img").exists(), "Both payload.bin and super.img supplied; choose one source")
         extracted.mkdir()
         run([tool("payload-dumper-go"), "-o", str(extracted), str(root / "payload.bin")])
-    elif (root / "super.img").exists():
-        extracted.mkdir()
-        run([tool("lpunpack"), str(root / "super.img"), str(extracted)])
-    if extracted.exists():
         # Only collect the selected slot; never silently merge two images.
         collect(extracted, root, slot)
         # Logical partitions from a payload may themselves still be sparse.
@@ -343,10 +594,17 @@ def main(argv=None):
             convert_components(base, args.slot)
             validate(base, args.profile)
             check((root / "system.img").is_file(), "Source has no system.img after partition extraction")
+            # system_ext/product are Treble's system side (framework extensions,
+            # SystemUI, their sepolicy halves) and ship as a set with system.
             # Keep the virtual kernel/vendor/ramdisk and fresh writable templates.
             # Do not import a phone's encrypted data or hardware-specific vendor.
-            shutil.copyfile(root / "system.img", base / "system.img")
+            for name in ("system.img", "system_ext.img", "product.img"):
+                if (root / name).is_file():
+                    os.replace(root / name, base / name)
             root = base
+        for name in ("system.img", "system_ext.img", "product.img", "vendor.img"):
+            if (root / name).is_file() and image_format(root / name) == "erofs":
+                erofs_to_ext4(root / name)
         validate(root, args.profile)
         if args.profile in ("p9", "p71"):
             (root / ("vmhost_guest_" + args.profile)).touch()
