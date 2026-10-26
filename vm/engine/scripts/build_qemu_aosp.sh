@@ -1671,6 +1671,11 @@ cp -f "$TOOLS_DIR/qemu_patches/vmhost_virglrenderer.h" "$VIRGL_STUB_DIR/virglren
 echo "==> 准备最小 virglrenderer.h 桩：$VIRGL_STUB_DIR/virglrenderer.h"
 
 # ---------------------------------------------------------------- 2. configure
+# Default off: only a short TCG MMU workload has demonstrated a small gain.
+# Explicit disable also removes a previous experiment in a reused source tree.
+python3 "$TOOLS_DIR/qemu_patches/patch_arm_regime_inline.py" "$SRC_DIR" \
+    --enable "${VMHOST_TCG_REGIME_INLINE:-0}"
+
 mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR"
 

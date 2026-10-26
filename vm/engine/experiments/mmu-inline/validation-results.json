@@ -1,0 +1,120 @@
+{
+  "schema": 1,
+  "date": "2026-10-26",
+  "scope": "One physical Android arm64 device; standalone shell/root-domain checks. No Android boot, App-domain or physical input-latency validation.",
+  "host_android_api": 36,
+  "host_cpu_affinity": [
+    6
+  ],
+  "production_default_enabled": false,
+  "full_system_speedup_proven": false,
+  "compiler_change": "Only always_inline annotation on the existing regime_el body",
+  "candidate_sha256": "6c614ff6be705c14f752be4620d54410c47934cef9890f8fac5ef5eeab9d711a",
+  "baseline_sha256": "3515da8eb02c068f466ad31eb96298ac19acf74ee6aed454f2fb300ed7e20ef0",
+  "guest_sha256": "5eec0137d036919f3a589293c06bd592547984d6e9d3fc9ba604c891568fd792",
+  "paired_function_checks": {
+    "control": {
+      "cases": 32768,
+      "successes": 3117,
+      "faults": 29651,
+      "digest": "dedd99a82886885c"
+    },
+    "inline": {
+      "cases": 32768,
+      "successes": 3117,
+      "faults": 29651,
+      "digest": "dedd99a82886885c"
+    }
+  },
+  "assembly_sample": {
+    "control": {
+      "regime_el_calls": 11,
+      "instructions": 935
+    },
+    "inline": {
+      "regime_el_calls": 0,
+      "instructions": 992
+    }
+  },
+  "real_tcg_configuration": {
+    "machine": "virt,gic-version=2",
+    "cpu": "cortex-a57",
+    "vcpus": 1,
+    "ram_mib": 64,
+    "guest_iterations": 8000,
+    "pages_after_each_tlbi": 32,
+    "order": [
+      "control",
+      "inline",
+      "inline",
+      "control",
+      "control",
+      "inline",
+      "inline",
+      "control",
+      "control",
+      "inline",
+      "inline",
+      "control"
+    ],
+    "counter_frequency_hz": 62500000,
+    "checksum": 4397496755294080000
+  },
+  "first_batch": {
+    "guest_ns": {
+      "control": [
+        53660416.0,
+        53424528.0,
+        53655360.0,
+        53150928.0,
+        52847344.0,
+        53085776.0
+      ],
+      "inline": [
+        51679120.0,
+        51740528.0,
+        51775216.0,
+        51816672.0,
+        52154848.0,
+        51613280.0
+      ]
+    },
+    "medians_ms": {
+      "control": 53.287728,
+      "inline": 51.757872
+    }
+  },
+  "recipe_reproduction": {
+    "guest_ns": {
+      "control": [
+        53155216.0,
+        53547808.0,
+        53232800.0,
+        52869376.0,
+        52911824.0,
+        53265312.0
+      ],
+      "inline": [
+        51771712.0,
+        52818064.0,
+        51475520.0,
+        51586256.0,
+        51603648.0,
+        51680928.0
+      ]
+    },
+    "medians_ms": {
+      "control": 53.194008,
+      "inline": 51.642288
+    },
+    "all_checksums_passed": true,
+    "all_exits_code_zero": true,
+    "temporary_files_removed": true
+  },
+  "limits": [
+    "Code-size growth may affect other workloads",
+    "Differential tests model physical bus, QOM and logging boundaries",
+    "Nested S1-to-S2 walks and concurrent page-table writes not independently covered",
+    "Single-vCPU pressure loop is not Android or SMP workload performance"
+  ]
+}

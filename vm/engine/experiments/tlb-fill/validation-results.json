@@ -1,0 +1,123 @@
+{
+  "schema": 1,
+  "date": "2026-10-26",
+  "accepted": false,
+  "scope": "actual cputlb.c functions in standalone Android shell process; locks/scheduler modeled; not guest application timing",
+  "checks": {
+    "passed": true,
+    "differential_flushes": 512,
+    "buffer_boundary_cases": 363,
+    "main_bytes": 65536,
+    "victim_bytes": 2048,
+    "bank_bytes": 8192,
+    "main_alignment_mod16": 0
+  },
+  "summary": [
+    {
+      "kind": 0,
+      "medians_cpu_ns": {
+        "False": 2264.062,
+        "True": 2266.328
+      },
+      "candidate_to_control": 1.0010008559836259,
+      "samples": {
+        "False": [
+          2571.68,
+          2264.531,
+          2263.945,
+          2264.101,
+          2264.023,
+          2263.737
+        ],
+        "True": [
+          2266.875,
+          2266.575,
+          2266.094,
+          2266.068,
+          2266.562,
+          2266.068
+        ]
+      }
+    },
+    {
+      "kind": 1,
+      "medians_cpu_ns": {
+        "False": 1554.3685,
+        "True": 1554.6154999999999
+      },
+      "candidate_to_control": 1.0001589069773351,
+      "samples": {
+        "False": [
+          1553.594,
+          1553.593,
+          1553.333,
+          1555.429,
+          1555.378,
+          1555.143
+        ],
+        "True": [
+          1554.531,
+          1555.091,
+          1555.039,
+          1554.44,
+          1554.401,
+          1554.7
+        ]
+      }
+    },
+    {
+      "kind": 2,
+      "medians_cpu_ns": {
+        "False": 1968.9385,
+        "True": 1955.7875
+      },
+      "candidate_to_control": 0.9933207664942302,
+      "samples": {
+        "False": [
+          1969.779,
+          1968.984,
+          1968.62,
+          1969.258,
+          1968.893,
+          1968.503
+        ],
+        "True": [
+          1955.638,
+          1955.938,
+          1955.768,
+          1955.807,
+          1955.768,
+          1958.333
+        ]
+      }
+    },
+    {
+      "kind": 3,
+      "medians_cpu_ns": {
+        "False": 2268.8995,
+        "True": 2271.797
+      },
+      "candidate_to_control": 1.0012770508345565,
+      "samples": {
+        "False": [
+          2269.114,
+          2268.62,
+          2268.568,
+          2270.338,
+          2269.545,
+          2268.685
+        ],
+        "True": [
+          2271.966,
+          2271.797,
+          2271.797,
+          2277.773,
+          2271.64,
+          2271.224
+        ]
+      }
+    }
+  ],
+  "full_system_speedup_proven": false,
+  "reason": "No useful improvement in this standalone complete-invalidation comparison; not integrated"
+}
