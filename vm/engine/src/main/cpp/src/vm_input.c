@@ -21,8 +21,11 @@
 #include "vm_render.h"
 #include "vm_guest_display.h"
 
-#ifdef VM_WITH_QEMU
+/* 纯声明头（触点槽位上限 VMHOST_TOUCH_SLOTS 也在这里），无 QEMU 的骨架构建同样需要，
+ * 因此不能跟着 QEMU 头一起放进 VM_WITH_QEMU 条件里。 */
 #include "vmhost_input.h"
+
+#ifdef VM_WITH_QEMU
 #include "vm_qemu.h"
 #include "vm_qmp.h"
 #endif
