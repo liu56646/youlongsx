@@ -111,4 +111,14 @@
     <string name="device_item_fmt">%1$s（%2$s）</string>
     <string name="device_applying">正在生成设备身份，请稍候…</string>
     <string name="device_apply_fail">设备身份写入失败，已按镜像默认身份创建</string>
+
+    <!-- 实例运维套件：事件日志 / 诊断包 / 存储清理 -->
+    <string name="action_diagnostics">导出诊断包</string>
+    <string name="action_storage_clean">存储清理</string>
+    <string name="storage_clean_title">存储盘点与清理</string>
+    <string name="storage_clean_hint">「清理」只删除下载残段与导入暂存（不含用户数据）；孤儿目录仅在此列出供排查，不会被删除。</string>
+    <string name="storage_clean_now">清理</string>
+    <string name="storage_clean_done_fmt">已释放 %1$s</string>
+    <string name="diagnostics_exported_fmt">诊断包已导出：%1$s</string>
+    <string name="diagnostics_empty">暂无可收集的诊断数据</string>
 </resources>

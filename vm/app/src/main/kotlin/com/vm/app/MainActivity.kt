@@ -29,13 +29,18 @@ import com.vm.core.VmBackendStore
 import com.vm.core.VmConstants
 import com.vm.core.VmDeviceCatalog
 import com.vm.core.VmDeviceCheck
+import com.vm.core.VmDiagnostics
 import com.vm.core.VmDiskStore
 import com.vm.core.VmGuestCatalog
 import com.vm.core.VmGuestImage
 import com.vm.core.VmImageProvider
 import com.vm.core.VmInfo
+import com.vm.core.VmLogStore
 import com.vm.core.VmRepository
+import com.vm.core.VmStorageReport
+import com.vm.core.VmStorageStats
 import com.vm.engine.VmEngine
+import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -50,6 +55,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var repository: VmRepository
     private lateinit var imageProvider: VmImageProvider
     private lateinit var diskStore: VmDiskStore
+    private lateinit var logStore: VmLogStore
+    private lateinit var storageStats: VmStorageStats
     private lateinit var adapter: VmAdapter
 
     private lateinit var backendStore: VmBackendStore
@@ -105,6 +112,8 @@ class MainActivity : AppCompatActivity() {
         repository = VmRepository(this)
         imageProvider = VmImageProvider(this)
         diskStore = VmDiskStore(this)
+        logStore = VmLogStore.from(this)
+        storageStats = VmStorageStats.from(this)
         backendStore = VmBackendStore(this)
         lastReport = backendStore.load()
         deviceReport = VmDeviceCheck.check(this)
@@ -490,6 +499,10 @@ class MainActivity : AppCompatActivity() {
                     toast(getString(R.string.err_limit, VmConstants.MAX_INSTANCES))
                 } else {
                     toast(getString(R.string.created_fmt, info.name))
+                    logStore.record(
+                        info.vmId, "Ops",
+                        "创建实例 image=${info.imageTag} profile=${deviceProfileId ?: "镜像默认"}"
+                    )
                     if (!applied) toast(getString(R.string.device_apply_fail))
                     refresh()
                 }
@@ -526,6 +539,8 @@ class MainActivity : AppCompatActivity() {
         val labels = listOf(
             getString(if (running) R.string.action_stop else R.string.action_start),
             getString(R.string.action_rename),
+            getString(R.string.action_diagnostics),
+            getString(R.string.action_storage_clean),
             getString(R.string.action_delete)
         )
 
@@ -535,6 +550,8 @@ class MainActivity : AppCompatActivity() {
                 when (which) {
                     0 -> if (running) stopVm(info) else startVm(info)
                     1 -> renameVm(info)
+                    2 -> exportDiagnostics(info)
+                    3 -> cleanStorage()
                     else -> confirmDelete(info)
                 }
             }
@@ -569,6 +586,7 @@ class MainActivity : AppCompatActivity() {
             .setTitle(info.name)
             .setMessage(R.string.confirm_delete)
             .setPositiveButton(R.string.action_delete) { _, _ ->
+                logStore.record(info.vmId, "Ops", "删除实例（image=${info.imageTag}，数据盘一并清除）")
                 VmRuntime.markStopped(info.vmId)
                 repository.delete(info.vmId)
                 refresh()
@@ -714,6 +732,88 @@ class MainActivity : AppCompatActivity() {
         else toast(getString(R.string.probe_export_fail))
     }
 
+    // ------------------------------------------------------------------
+    // 运维套件：事件日志 / 诊断包导出 / 存储清理
+    // ------------------------------------------------------------------
+
+    /**
+     * 导出单个实例的诊断包：设备预检 + 加速探测 + 存储盘点 + 该实例的
+     * 配置快照、宿主事件日志尾部、引擎串口日志尾部，一个 zip 全带走。
+     */
+    private fun exportDiagnostics(info: VmInfo) {
+        Thread {
+            val dir = getExternalFilesDir(null) ?: filesDir
+            val target = File(
+                dir,
+                "youlong-diagnostics-vm${info.vmId}-${System.currentTimeMillis()}.zip"
+            )
+            val builder = VmDiagnostics.builder()
+                .addDeviceCheck(deviceReport)
+                .addStorageReport(storageScan())
+            lastReport?.let { builder.addBackendReport(it) }
+            builder.addFile("vm${info.vmId}_config", diskStore.configFile(info.vmId))
+            builder.addText(
+                "vm${info.vmId}_events",
+                logStore.tail(info.vmId, DIAGNOSTICS_EVENT_LINES).joinToString("\n")
+            )
+            builder.addFileTail(
+                "vm${info.vmId}_console",
+                File(diskStore.logDir(info.vmId), "console.log")
+            )
+            val out = builder.build(target)
+            runOnUiThread {
+                toast(
+                    if (out != null) getString(R.string.diagnostics_exported_fmt, out.absolutePath)
+                    else getString(R.string.diagnostics_empty)
+                )
+            }
+        }.start()
+    }
+
+    /** 盘点存储（IO 重，调用方放后台线程）：在册实例号 + 在册/仍被引用的镜像 tag。 */
+    private fun storageScan(): VmStorageReport {
+        val vms = repository.list()
+        val knownIds = vms.map { it.vmId }.toSet()
+        val knownTags = buildSet {
+            addAll(VmGuestCatalog.ALL.map { it.tag })
+            addAll(imageProvider.importedImages().map { it.tag })
+            vms.forEach { add(it.imageTag) }
+        }
+        return storageStats.scan(knownIds, knownTags)
+    }
+
+    private fun cleanStorage() {
+        if (!busy.compareAndSet(false, true)) return
+        Thread {
+            val report = storageScan()
+            runOnUiThread {
+                busy.set(false)
+                showCleanDialog(report)
+            }
+        }.start()
+    }
+
+    private fun showCleanDialog(report: VmStorageReport) {
+        AlertDialog.Builder(this)
+            .setTitle(R.string.storage_clean_title)
+            .setMessage(report.toReportText() + "\n\n" + getString(R.string.storage_clean_hint))
+            .setPositiveButton(R.string.storage_clean_now) { _, _ ->
+                Thread {
+                    val result = storageStats.clean(report)
+                    runOnUiThread {
+                        toast(
+                            getString(
+                                R.string.storage_clean_done_fmt,
+                                VmStorageStats.humanBytes(result.freedBytes)
+                            )
+                        )
+                    }
+                }.start()
+            }
+            .setNegativeButton(R.string.action_cancel, null)
+            .show()
+    }
+
     /**
      * 网络自动准备：已授权过就直接拉起 VPN 服务（幂等），否则引导一次系统授权
      * （结果在 [vpnConsent] 回调里记录）。
@@ -766,5 +866,8 @@ class MainActivity : AppCompatActivity() {
 
         /** VPN 网络是否已授权并可用（启动 VM 时自动准备用）。 */
         private const val KEY_NET_READY = "net_ready"
+
+        /** 诊断包里收录的事件日志行数：太多则包体积不可控，太少则不够对齐时间轴。 */
+        private const val DIAGNOSTICS_EVENT_LINES = 500
     }
 }
