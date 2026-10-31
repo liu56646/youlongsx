@@ -15,6 +15,7 @@ import com.vm.core.VmDeviceCheck
 import com.vm.core.VmDiskStore
 import com.vm.core.VmImageProvider
 import com.vm.core.VmInfo
+import com.vm.core.VmLogStore
 import com.vm.engine.VmEngine
 
 /**
@@ -94,6 +95,14 @@ object VmLauncher {
         // 落一份配置快照，便于事后排查
         diskStore.configFile(info.vmId).writeText(config.toJson())
 
+        // 宿主侧事件日志：把「这次启动到底给了什么配置」钉进证据链，
+        // 排障时与访客侧 console.log 按时间轴对齐（见 VmLogStore 的说明）。
+        VmLogStore.from(context).record(
+            info.vmId, "Launcher",
+            "启动 ${info.name}：backend=${backend.name} " +
+                "mem=${device.suggestedGuestMemMb}MB cores=$cores image=${info.imageTag}"
+        )
+
         val payload = config.toJson()
         val intent = Intent(context, cls)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -114,6 +123,7 @@ object VmLauncher {
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             .putExtra(EXTRA_STOP, true)
         context.startActivity(intent)
+        VmLogStore.from(context).record(vmId, "Launcher", "停止指令已投递（引擎将保存快照后退出）")
         Log.i(TAG, "stop vm=$vmId")
         return true
     }
